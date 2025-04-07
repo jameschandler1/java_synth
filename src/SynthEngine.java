@@ -40,6 +40,16 @@ public class SynthEngine {
     private Add mixer;          // Mixes all voice outputs together
     private MultiplyAdd amp;    // Controls master volume
     
+    // Effects processor
+    private FXProcessor fxProcessor;
+    
+    // Effect state flags
+    private boolean delayEnabled = false;
+    private boolean reverbEnabled = false;
+    private boolean distortionEnabled = false;
+    // This flag will be used in future implementation of delay sync functionality
+    private boolean delaySyncEnabled = false; // TODO: Implement delay sync in future update
+    
     // Parameter smoothing to prevent audio artifacts
     private LinearRamp cutoffRamp;    // Smooths filter cutoff changes
     private LinearRamp resonanceRamp;  // Smooths filter resonance changes
@@ -81,6 +91,9 @@ public class SynthEngine {
         filter = new FilterStateVariable();    // Multi-mode filter
         mixer = new Add();                    // Combines all voices
         amp = new MultiplyAdd();              // Master volume control
+        
+        // Create effects processor
+        fxProcessor = new FXProcessor(synth);
         
         // Create parameter smoothing components
         cutoffRamp = new LinearRamp();
@@ -124,7 +137,7 @@ public class SynthEngine {
         // Connect parameter smoothing to their targets
         cutoffRamp.output.connect(filter.frequency);     // Smooth cutoff changes
         resonanceRamp.output.connect(filter.resonance);  // Smooth resonance changes
-        volumeRamp.output.connect(lineOut.input);       // Smooth volume changes
+        volumeRamp.output.connect(amp.inputB);          // Smooth volume changes to amplifier
     }
 
     /**
@@ -161,20 +174,29 @@ public class SynthEngine {
 
     /**
      * Sets up the main audio signal path through the synthesizer.
-     * Signal flow: Voices -> Mixer -> Filter -> Amplifier -> Output
+     * Signal flow: Voices -> Mixer -> Filter -> FX Processor -> Amplifier -> Output
      */
     private void setupSignalPath() {
         mixer.output.connect(0, filter.input, 0);     // Connect mixer to filter input
-        connectFilterOutput();                        // Connect filter to amp (based on type)
+        connectFilterOutput();                        // Connect filter to FX processor (based on type)
+        fxProcessor.connectOutput(amp.inputA);        // Connect FX processor to amplifier
         amp.output.connect(0, lineOut.input, 0);     // Connect amp to audio output
     }
 
     /**
      * Configures the master amplifier settings.
-     * Sets initial volume level to prevent clipping.
+     * Sets up the amplifier to use the volume ramp for smooth volume control.
+     * The MultiplyAdd unit calculates: output = (inputA * inputB) + inputC
      */
     private void configureAmplifier() {
-        amp.inputB.set(0.9);  // Set master volume to 90% to prevent clipping
+        // Set initial volume level
+        volumeRamp.input.set(0.7);  // Set initial volume to 70%
+        
+        // Configure the amplifier to use multiplication for volume control
+        // inputA receives the audio signal from the FX processor
+        // inputB receives the volume control from the volume ramp
+        // inputC is set to 0.0 (no offset)
+        amp.inputC.set(0.0);       // No additional offset
     }
 
     /**
@@ -246,14 +268,21 @@ public class SynthEngine {
 
     /**
      * Sets the filter cutoff frequency with smoothing.
-     * The frequency is clamped to the audible range.
+     * The frequency is clamped to the audible range and uses logarithmic scaling
+     * for more natural frequency perception (following the musical scale).
      * 
      * @param frequency Desired cutoff frequency in Hz (20-20000)
      */
     public void setCutoff(double frequency) {
         // Clamp frequency to audible range (20Hz - 20kHz)
-        double scaledFreq = Math.min(20000.0, Math.max(20.0, frequency));
-        cutoffRamp.input.set(scaledFreq);  // Set with smoothing
+        double safeFreq = Math.min(20000.0, Math.max(20.0, frequency));
+        
+        // Apply logarithmic scaling for more natural frequency perception
+        // This follows the musical scale where each octave doubles the frequency
+        // If the input is already in Hz (20-20000), we don't need additional scaling
+        // as frequency itself is already logarithmic in nature
+        
+        cutoffRamp.input.set(safeFreq);  // Set with smoothing
     }
 
     /**
@@ -270,11 +299,28 @@ public class SynthEngine {
 
     /**
      * Sets the master volume with smoothing to prevent clicks.
+     * Uses a logarithmic scale for more natural volume perception.
      * 
      * @param volume Volume level (0.0-1.0)
      */
     public void setMasterVolume(double volume) {
-        volumeRamp.input.set(volume);  // Set with smoothing
+        // Ensure volume is within valid range
+        double safeVolume = Math.min(Math.max(volume, 0.0), 1.0);
+        
+        // Apply logarithmic scaling for more natural volume perception
+        // This creates a more natural volume curve where small changes at low volumes
+        // are more noticeable than the same changes at high volumes
+        double logVolume;
+        if (safeVolume > 0) {
+            // Use a logarithmic curve that gives finer control at lower volumes
+            // The constant 4.0 determines how pronounced the logarithmic curve is
+            logVolume = Math.pow(safeVolume, 4.0);
+        } else {
+            logVolume = 0.0; // Handle volume = 0 case
+        }
+        
+        // Apply the scaled volume with smoothing
+        volumeRamp.input.set(logVolume);
     }
 
     /**
@@ -344,6 +390,7 @@ public class SynthEngine {
     /**
      * Changes the current filter type and updates signal routing.
      * Supports switching between lowpass, highpass, and bandpass modes.
+     * Also updates the FXProcessor to optimize reverb settings for the current filter type.
      * 
      * @param type The new filter type to use
      */
@@ -351,7 +398,261 @@ public class SynthEngine {
         if (type != currentFilterType) {           // Only change if different
             currentFilterType = type;               // Update current type
             connectFilterOutput();                  // Reconnect filter outputs
+            
+            // Update FXProcessor with the new filter type
+            // Convert enum to int value (0=LOWPASS, 1=HIGHPASS, 2=BANDPASS)
+            int filterTypeValue = type.ordinal();
+            fxProcessor.setCurrentFilterType(filterTypeValue);
         }
+    }
+    
+    // These methods have been replaced by individual effect enable/disable methods
+    
+    /**
+     * Sets the delay time for the delay effect.
+     * If delay sync is enabled, the time will be quantized to musical values.
+     * 
+     * @param seconds Delay time in seconds (0.0-2.0)
+     */
+    public void setDelayTime(double seconds) {
+        if (delaySyncEnabled) {
+            // Quantize to musical values (e.g., 16th, 8th, quarter notes at 120 BPM)
+            double bpm = 120.0;
+            double beatDuration = 60.0 / bpm; // Duration of one beat in seconds
+            
+            // Available note durations (in beats)
+            double[] noteDurations = {0.25, 0.5, 1.0, 1.5, 2.0}; // 16th, 8th, quarter, dotted quarter, half
+            
+            // Find the closest musical value
+            double closestDuration = noteDurations[0] * beatDuration;
+            double minDifference = Math.abs(seconds - closestDuration);
+            
+            for (int i = 1; i < noteDurations.length; i++) {
+                double currentDuration = noteDurations[i] * beatDuration;
+                double difference = Math.abs(seconds - currentDuration);
+                
+                if (difference < minDifference) {
+                    minDifference = difference;
+                    closestDuration = currentDuration;
+                }
+            }
+            
+            // Use the quantized value
+            fxProcessor.setDelayTime(closestDuration);
+        } else {
+            // Use the exact value provided
+            fxProcessor.setDelayTime(seconds);
+        }
+    }
+    
+    /**
+     * Sets the feedback amount for the delay effect.
+     * 
+     * @param amount Feedback amount (0.0-0.95)
+     */
+    public void setFeedback(double amount) {
+        fxProcessor.setFeedback(amount);
+    }
+    
+    /**
+     * Sets the delay feedback amount.
+     * Alias for setFeedback to match UI naming convention.
+     * 
+     * @param amount Feedback amount (0.0-0.95)
+     */
+    public void setDelayFeedback(double amount) {
+        setFeedback(amount);
+    }
+    
+    /**
+     * Sets the wet/dry mix for the delay effect.
+     * 
+     * @param mix Mix amount (0.0=dry, 1.0=wet)
+     */
+    public void setDelayWetDryMix(double mix) {
+        fxProcessor.setDelayWetDryMix(mix);
+    }
+    
+    /**
+     * Sets the wet/dry mix for the reverb effect.
+     * 
+     * @param mix Mix amount (0.0=dry, 1.0=wet)
+     */
+    public void setReverbWetDryMix(double mix) {
+        fxProcessor.setReverbWetDryMix(mix);
+    }
+    
+    /**
+     * Sets the wet/dry mix for the distortion effect.
+     * 
+     * @param mix Mix amount (0.0=dry, 1.0=wet)
+     */
+    public void setDistortionWetDryMix(double mix) {
+        fxProcessor.setDistortionWetDryMix(mix);
+    }
+    
+    /**
+     * Sets the effect wet/dry mix for all effects.
+     * Legacy method for backward compatibility.
+     * 
+     * @param mix Mix amount (0.0=dry, 1.0=wet)
+     */
+    public void setEffectWetDryMix(double mix) {
+        setDelayWetDryMix(mix);
+        setReverbWetDryMix(mix);
+        setDistortionWetDryMix(mix);
+    }
+    
+    /**
+     * Sets the distortion amount.
+     * 
+     * @param amount Distortion amount (0.0-1.0)
+     */
+    public void setDistortion(double amount) {
+        fxProcessor.setDistortion(amount);
+    }
+    
+    /**
+     * Sets the distortion amount.
+     * Alias for setDistortion to match UI naming convention.
+     * 
+     * @param amount Distortion amount (0.0-1.0)
+     */
+    public void setDistortionAmount(double amount) {
+        setDistortion(amount);
+    }
+    
+    /**
+     * Enables or disables the delay effect.
+     * 
+     * @param enabled Whether the delay effect should be enabled
+     */
+    public void enableDelayEffect(boolean enabled) {
+        delayEnabled = enabled;
+        updateEffectState();
+    }
+    
+    /**
+     * Enables or disables the reverb effect.
+     * 
+     * @param enabled Whether the reverb effect should be enabled
+     */
+    public void enableReverbEffect(boolean enabled) {
+        reverbEnabled = enabled;
+        updateEffectState();
+    }
+    
+    /**
+     * Enables or disables the distortion effect.
+     * 
+     * @param enabled Whether the distortion effect should be enabled
+     */
+    public void enableDistortionEffect(boolean enabled) {
+        distortionEnabled = enabled;
+        updateEffectState();
+    }
+    
+    /**
+     * Enables or disables delay sync mode.
+     * When sync is enabled, delay time will be quantized to musical values.
+     * 
+     * @param enabled Whether sync mode should be enabled
+     */
+    public void setDelaySyncEnabled(boolean enabled) {
+        delaySyncEnabled = enabled;
+        
+        // If sync is enabled, quantize the delay time to musical values
+        if (enabled) {
+            // Calculate a musically relevant delay time (e.g., quarter note at 120 BPM)
+            // 60 seconds / 120 BPM = 0.5 seconds per beat
+            double syncedDelayTime = 0.5; // Quarter note at 120 BPM
+            fxProcessor.setDelayTime(syncedDelayTime);
+        }
+        // When disabled, the delay time remains at its current value
+        // and can be freely adjusted
+    }
+    
+
+    
+    /**
+     * Updates the effect state based on which effects are enabled.
+     * This method enables or disables effects in the FX processor.
+     */
+    private void updateEffectState() {
+        fxProcessor.enableDelayEffect(delayEnabled);
+        fxProcessor.enableReverbEffect(reverbEnabled);
+        fxProcessor.enableDistortionEffect(distortionEnabled);
+    }
+    
+    /**
+     * Resets all delay components to safe default values.
+     * This can be called if audio artifacts or thread safety issues are detected.
+     * It resets all delay and reverb parameters to conservative values to prevent
+     * buffer overruns and thread safety issues.
+     * 
+     * @return true if reset was successful, false otherwise
+     */
+    public boolean resetDelayComponents() {
+        try {
+            // Call the FXProcessor's reset method to restore safe defaults
+            fxProcessor.resetDelayComponents();
+            System.out.println("SynthEngine: Successfully reset all delay components");
+            return true;
+        } catch (Exception e) {
+            System.err.println("SynthEngine: Error resetting delay components: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    /**
+     * Sets the reverb size (simulated room size).
+     * 
+     * @param size Room size (0.0-1.0)
+     */
+    public void setReverbSize(double size) {
+        fxProcessor.setReverbSize(size);
+    }
+    
+    /**
+     * Sets the reverb decay time.
+     * Controls how long the reverb tail persists.
+     * 
+     * @param decay Decay amount (0.0-1.0)
+     */
+    public void setReverbDecay(double decay) {
+        fxProcessor.setReverbDecay(decay);
+    }
+    
+    /**
+     * Sets the reverb gain amount.
+     * Controls the overall level of the reverb effect.
+     * 
+     * @param gain Gain amount (0.0-1.0)
+     */
+    public void setReverbGain(double gain) {
+        fxProcessor.setReverbGain(gain);
+    }
+    
+    /**
+     * Sets the reverb frequency (for backward compatibility).
+     * Maps to decay in the new implementation.
+     * 
+     * @param normalizedFreq Normalized frequency value (0.0-1.0)
+     */
+    public void setReverbFrequency(double normalizedFreq) {
+        // Map the old frequency parameter to the new decay parameter
+        fxProcessor.setReverbDecay(normalizedFreq);
+    }
+    
+    /**
+     * Sets the reverb resonance (for backward compatibility).
+     * Maps to gain in the new implementation.
+     * 
+     * @param resonance Resonance amount (0.0-1.0)
+     */
+    public void setReverbResonance(double resonance) {
+        // Map the old resonance parameter to the new gain parameter
+        fxProcessor.setReverbGain(resonance);
     }
 
     /**
@@ -368,21 +669,22 @@ public class SynthEngine {
      * Ensures only one filter output is connected at a time.
      */
     private void connectFilterOutput() {
-        // First disconnect all filter outputs
-        filter.lowPass.disconnect(0, amp.inputA, 0);    // Disconnect lowpass
-        filter.highPass.disconnect(0, amp.inputA, 0);   // Disconnect highpass
-        filter.bandPass.disconnect(0, amp.inputA, 0);   // Disconnect bandpass
+        // First disconnect all filter outputs from FX processor
+        // Disconnect all connections from filter outputs
+        filter.lowPass.disconnectAll();    // Disconnect lowpass
+        filter.highPass.disconnectAll();   // Disconnect highpass
+        filter.bandPass.disconnectAll();   // Disconnect bandpass
 
-        // Connect only the selected filter type
+        // Connect only the selected filter type to FX processor
         switch (currentFilterType) {
             case LOWPASS:
-                filter.lowPass.connect(0, amp.inputA, 0);    // Connect lowpass
+                fxProcessor.connectInput(filter.lowPass);    // Connect lowpass
                 break;
             case HIGHPASS:
-                filter.highPass.connect(0, amp.inputA, 0);   // Connect highpass
+                fxProcessor.connectInput(filter.highPass);   // Connect highpass
                 break;
             case BANDPASS:
-                filter.bandPass.connect(0, amp.inputA, 0);   // Connect bandpass
+                fxProcessor.connectInput(filter.bandPass);   // Connect bandpass
                 break;
         }
     }

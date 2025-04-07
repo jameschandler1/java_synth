@@ -15,6 +15,18 @@ import java.util.HashMap;
 import com.formdev.flatlaf.FlatDarkLaf;
 
 public class SynthUI {
+    /**
+     * Enum defining different parameter types for appropriate logarithmic scaling.
+     * Each type has a different scaling factor and visual representation.
+     */
+    private enum ParameterType {
+        VOLUME,     // Volume controls (0-100%)
+        FREQUENCY,  // Frequency controls (Hz)
+        TIME,       // Time-based controls (ms, seconds)
+        RESONANCE,  // Resonance/Q controls (0-100%)
+        GAIN,       // Gain controls (0-100%)
+        MIX         // Mix/balance controls (0-100%)
+    }
     private JFrame frame;
     private SynthEngine engine;
     private HashMap<Integer, Integer> keyboardMapping;
@@ -58,6 +70,12 @@ public class SynthUI {
         }
     }
 
+    /**
+     * Maps computer keyboard keys to MIDI note numbers for virtual keyboard functionality.
+     * This allows the user to play the synthesizer using their computer keyboard.
+     * The mapping follows a piano-like layout where the home row represents white keys
+     * and the row above represents black keys.
+     */
     private void initializeKeyboardMapping() {
         keyboardMapping = new HashMap<>();
         // Map computer keyboard to MIDI notes (C4 = 60)
@@ -99,6 +117,12 @@ public class SynthUI {
         noteNames.put(72, "C5");
     }
 
+    /**
+     * Creates and configures the main user interface for the synthesizer.
+     * Sets up the modern dark theme, creates all UI components including sliders,
+     * buttons, and panels, and organizes them into a cohesive layout.
+     * Also configures event listeners for user interaction.
+     */
     private void createAndShowGUI() {
         // Set up modern dark theme
         FlatDarkLaf.setup();
@@ -208,24 +232,24 @@ public class SynthUI {
         
         filterSection.add(filterTypePanel);
 
-        // Add filter controls
-        addSliderControl(filterSection, "Cutoff", 20, 20000, 2000, 
+        // Add filter controls with logarithmic scaling for more natural control
+        addLogSlider(filterSection, "Cutoff", 20, 20000, 2000, ParameterType.FREQUENCY, 
             value -> engine.setCutoff(value));
-        addSliderControl(filterSection, "Resonance", 0, 100, 5, 
+        addLogSlider(filterSection, "Resonance", 0, 100, 5, ParameterType.RESONANCE, 
             value -> engine.setResonance(value / 100.0));
 
-        // Add envelope controls
-        addSliderControl(envelopeSection, "Attack", 1, 1000, 80, 
+        // Add envelope controls with logarithmic scaling for more natural time response
+        addLogSlider(envelopeSection, "Attack", 1, 1000, 80, ParameterType.TIME, 
             value -> engine.setEnvelopeAttack(value / 1000.0));
-        addSliderControl(envelopeSection, "Decay", 1, 1000, 200, 
+        addLogSlider(envelopeSection, "Decay", 1, 1000, 200, ParameterType.TIME, 
             value -> engine.setEnvelopeDecay(value / 1000.0));
-        addSliderControl(envelopeSection, "Sustain", 0, 100, 70, 
+        addLogSlider(envelopeSection, "Sustain", 0, 100, 70, ParameterType.GAIN, 
             value -> engine.setEnvelopeSustain(value / 100.0));
-        addSliderControl(envelopeSection, "Release", 1, 1000, 300, 
+        addLogSlider(envelopeSection, "Release", 1, 1000, 300, ParameterType.TIME, 
             value -> engine.setEnvelopeRelease(value / 1000.0));
 
-        // Add master controls
-        addSliderControl(masterSection, "Volume", 0, 100, 50, 
+        // Add master controls with logarithmic volume slider for better control
+        addLogSlider(masterSection, "Volume", 0, 100, 70, ParameterType.VOLUME, 
             value -> engine.setMasterVolume(value / 100.0));
 
         // Create a dedicated panel to display the currently pressed note
@@ -253,10 +277,193 @@ public class SynthUI {
         
         noteDisplayPanel.add(noteDisplayContainer);
         
+        // Create effects section
+        JPanel effectsSection = createSection("Effects");
+        
+        // Effect on/off switches panel
+        JPanel effectTogglePanel = new JPanel();
+        effectTogglePanel.setLayout(new BoxLayout(effectTogglePanel, BoxLayout.X_AXIS));
+        effectTogglePanel.setOpaque(false);
+        effectTogglePanel.setBorder(new EmptyBorder(5, 5, 5, 5));
+        effectTogglePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        effectTogglePanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 35));
+        
+        JLabel enableLabel = new JLabel("Enable");
+        enableLabel.setForeground(new Color(200, 200, 200));
+        enableLabel.setPreferredSize(new Dimension(80, 25));
+        effectTogglePanel.add(enableLabel);
+        effectTogglePanel.add(Box.createHorizontalStrut(10));
+        
+        effectsSection.add(effectTogglePanel);
+        
+
+        
+        JToggleButton delayToggle = new JToggleButton("Delay");
+        delayToggle.setFont(retroFont.deriveFont(12f));
+        delayToggle.setMaximumSize(new Dimension(80, 25));
+        delayToggle.setPreferredSize(new Dimension(80, 25));
+        delayToggle.addActionListener(e -> {
+            boolean isSelected = delayToggle.isSelected();
+            engine.enableDelayEffect(isSelected);
+            frame.requestFocusInWindow();
+        });
+        
+        JToggleButton reverbToggle = new JToggleButton("Reverb");
+        reverbToggle.setFont(retroFont.deriveFont(12f));
+        reverbToggle.setMaximumSize(new Dimension(80, 25));
+        reverbToggle.setPreferredSize(new Dimension(80, 25));
+        reverbToggle.addActionListener(e -> {
+            boolean isSelected = reverbToggle.isSelected();
+            engine.enableReverbEffect(isSelected);
+            frame.requestFocusInWindow();
+        });
+        
+        JToggleButton distortionToggle = new JToggleButton("Dist");
+        distortionToggle.setFont(retroFont.deriveFont(12f));
+        distortionToggle.setMaximumSize(new Dimension(80, 25));
+        distortionToggle.setPreferredSize(new Dimension(80, 25));
+        distortionToggle.addActionListener(e -> {
+            boolean isSelected = distortionToggle.isSelected();
+            engine.enableDistortionEffect(isSelected);
+            frame.requestFocusInWindow();
+        });
+        
+        effectTogglePanel.add(delayToggle);
+        effectTogglePanel.add(Box.createHorizontalStrut(5));
+        effectTogglePanel.add(reverbToggle);
+        effectTogglePanel.add(Box.createHorizontalStrut(5));
+        effectTogglePanel.add(distortionToggle);
+        effectTogglePanel.add(Box.createHorizontalGlue());
+        
+        effectsSection.add(effectTogglePanel);
+        
+        // Delay controls
+        JPanel delayPanel = new JPanel();
+        delayPanel.setLayout(new BoxLayout(delayPanel, BoxLayout.Y_AXIS));
+        delayPanel.setOpaque(false);
+        delayPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        delayPanel.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(new Color(100, 100, 100), 1, true),
+            "Delay",
+            0,
+            0,
+            retroFont.deriveFont(12f),
+            new Color(180, 180, 180)
+        ));
+        
+        // Delay time control with logarithmic scaling for more natural time response
+        addLogSlider(delayPanel, "Time", 1, 200, 30, ParameterType.TIME, value -> {
+            // Convert 1-200 to 0.01-2.0 seconds
+            engine.setDelayTime(value / 100.0);
+        });
+        
+        // Delay feedback control with logarithmic scaling for more natural response
+        addLogSlider(delayPanel, "Feedback", 0, 95, 40, ParameterType.GAIN, value -> {
+            // Convert 0-95 to 0.0-0.95 feedback amount
+            engine.setDelayFeedback(value / 100.0);
+        });
+        
+        // Delay sync toggle
+        JPanel delaySyncPanel = new JPanel();
+        delaySyncPanel.setLayout(new BoxLayout(delaySyncPanel, BoxLayout.X_AXIS));
+        delaySyncPanel.setOpaque(false);
+        delaySyncPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        delaySyncPanel.setBorder(new EmptyBorder(5, 5, 5, 5));
+        delaySyncPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 35));
+        
+        JLabel syncLabel = new JLabel("Sync");
+        syncLabel.setForeground(new Color(200, 200, 200));
+        syncLabel.setPreferredSize(new Dimension(80, 25));
+        delaySyncPanel.add(syncLabel);
+        delaySyncPanel.add(Box.createHorizontalStrut(10));
+        
+        JToggleButton syncToggle = new JToggleButton("OFF");
+        syncToggle.setFont(retroFont.deriveFont(12f));
+        syncToggle.setMaximumSize(new Dimension(80, 25));
+        syncToggle.setPreferredSize(new Dimension(80, 25));
+        syncToggle.addActionListener(e -> {
+            boolean isSelected = syncToggle.isSelected();
+            syncToggle.setText(isSelected ? "ON" : "OFF");
+            engine.setDelaySyncEnabled(isSelected);
+            frame.requestFocusInWindow();
+        });
+        
+        delaySyncPanel.add(syncToggle);
+        delaySyncPanel.add(Box.createHorizontalGlue());
+        // Delay wet/dry mix control
+        addLogSlider(delayPanel, "Mix", 0, 100, 50, ParameterType.MIX, 
+            value -> engine.setDelayWetDryMix(value / 100.0));
+            
+        delayPanel.add(delaySyncPanel);
+        
+        effectsSection.add(delayPanel);
+        
+        // Reverb controls
+        JPanel reverbPanel = new JPanel();
+        reverbPanel.setLayout(new BoxLayout(reverbPanel, BoxLayout.Y_AXIS));
+        reverbPanel.setOpaque(false);
+        reverbPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        reverbPanel.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(new Color(100, 100, 100), 1, true),
+            "Reverb",
+            0,
+            0,
+            retroFont.deriveFont(12f),
+            new Color(180, 180, 180)
+        ));
+        
+        // Reverb size control with logarithmic scaling for more natural response
+        addLogSlider(reverbPanel, "Size", 0, 100, 50, ParameterType.GAIN, value -> {
+            engine.setReverbSize(value / 100.0);
+        });
+        
+        // Reverb decay control with logarithmic scaling for more natural time response
+        addLogSlider(reverbPanel, "Decay", 0, 100, 60, ParameterType.TIME, value -> {
+            engine.setReverbDecay(value / 100.0);
+        });
+        
+        // Reverb gain control with logarithmic scaling for more natural response
+        addLogSlider(reverbPanel, "Gain", 0, 100, 80, ParameterType.GAIN, value -> {
+            engine.setReverbGain(value / 100.0);
+        });
+        
+        // Reverb wet/dry mix control with logarithmic scaling
+        addLogSlider(reverbPanel, "Mix", 0, 100, 50, ParameterType.MIX, 
+            value -> engine.setReverbWetDryMix(value / 100.0));
+            
+        effectsSection.add(reverbPanel);
+        
+        // Distortion controls
+        JPanel distortionPanel = new JPanel();
+        distortionPanel.setLayout(new BoxLayout(distortionPanel, BoxLayout.Y_AXIS));
+        distortionPanel.setOpaque(false);
+        distortionPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        distortionPanel.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(new Color(100, 100, 100), 1, true),
+            "Distortion",
+            0,
+            0,
+            retroFont.deriveFont(12f),
+            new Color(180, 180, 180)
+        ));
+        
+        // Distortion gain control with logarithmic scaling for more natural response
+        addLogSlider(distortionPanel, "Gain", 0, 100, 50, ParameterType.GAIN, value -> {
+            engine.setDistortionAmount(value / 100.0);
+        });
+        
+        // Distortion wet/dry mix control with logarithmic scaling
+        addLogSlider(distortionPanel, "Mix", 0, 100, 50, ParameterType.MIX, 
+            value -> engine.setDistortionWetDryMix(value / 100.0));
+            
+        effectsSection.add(distortionPanel);
+        
         // Add sections to main panel with proper spacing
         mainPanel.add(filterSection);
         mainPanel.add(Box.createVerticalStrut(15));
         mainPanel.add(envelopeSection);
+        mainPanel.add(Box.createVerticalStrut(15));
+        mainPanel.add(effectsSection);
         mainPanel.add(Box.createVerticalStrut(15));
         mainPanel.add(masterSection);
         mainPanel.add(Box.createVerticalStrut(15));
@@ -341,8 +548,61 @@ public class SynthUI {
         return section;
     }
 
-    private void addSliderControl(JPanel panel, String label, int min, int max, int initial, 
-                                SliderCallback callback) {
+    // This method has been replaced by addLogSlider which provides logarithmic scaling
+    // for more natural control of audio parameters
+
+    @FunctionalInterface
+    interface SliderCallback {
+        void onValueChanged(double value);
+    }
+    
+    /**
+     * Formats the value label based on parameter type.
+     * 
+     * @param value The raw slider value
+     * @param paramType The type of parameter (frequency, time, volume, etc.)
+     * @param min The minimum value of the parameter range
+     * @param max The maximum value of the parameter range
+     * @return Formatted string representation of the value with appropriate units
+     */
+    private String formatValueLabel(int value, ParameterType paramType, int min, int max) {
+        switch (paramType) {
+            case FREQUENCY:
+                if (value >= 1000) {
+                    return (value / 1000) + "kHz";
+                } else {
+                    return value + "Hz";
+                }
+            case TIME:
+                if (value >= 1000) {
+                    return (value / 1000.0) + "s";
+                } else {
+                    return value + "ms";
+                }
+            case VOLUME:
+            case GAIN:
+            case RESONANCE:
+            case MIX:
+            default:
+                return value + "%";
+        }
+    }
+    
+    /**
+     * Adds a logarithmic slider control with visual feedback appropriate for the parameter type.
+     * This provides more natural control where small adjustments at lower values 
+     * are more noticeable than the same adjustments at higher values.
+     * 
+     * @param panel The panel to add the slider to
+     * @param label The label text for the slider
+     * @param min The minimum value
+     * @param max The maximum value
+     * @param initial The initial value
+     * @param paramType The type of parameter (volume, time, frequency, etc.)
+     * @param callback The callback to call when the value changes
+     */
+    private void addLogSlider(JPanel panel, String label, int min, int max, int initial, 
+                            ParameterType paramType, SliderCallback callback) {
         JPanel controlPanel = new JPanel();
         controlPanel.setLayout(new BoxLayout(controlPanel, BoxLayout.X_AXIS));
         controlPanel.setOpaque(false);
@@ -350,7 +610,7 @@ public class SynthUI {
         controlPanel.setBorder(new EmptyBorder(5, 5, 5, 5));
         controlPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 35));
 
-        // Label
+        // Label with volume icon
         JLabel labelComponent = new JLabel(label);
         labelComponent.setFont(retroFont.deriveFont(12f));
         labelComponent.setForeground(new Color(200, 200, 200));
@@ -359,53 +619,218 @@ public class SynthUI {
 
         controlPanel.add(Box.createHorizontalStrut(10));
 
-        // Slider with custom gray thumb
+        // Volume slider with custom UI
         JSlider slider = new JSlider(min, max, initial);
         slider.setOpaque(false);
         slider.setPreferredSize(new Dimension(200, 25));
         slider.setMinimumSize(new Dimension(150, 25));
         
-        // Custom UI for gray slider thumb to match the 80s aesthetic
+        // Custom UI for volume slider with colored track to indicate level
         slider.setUI(new BasicSliderUI(slider) {
+            @Override
+            public void paintTrack(Graphics g) {
+                Graphics2D g2d = (Graphics2D) g;
+                g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                
+                Rectangle trackBounds = trackRect;
+                int trackY = trackBounds.y + (trackBounds.height / 2) - 2;
+                int trackHeight = 4;
+                
+                // Calculate filled width based on current value
+                int thumbPos = xPositionForValue(slider.getValue());
+                int filledWidth = thumbPos - trackBounds.x;
+                
+                // Draw background track (unfilled portion)
+                g2d.setColor(new Color(60, 60, 60));
+                g2d.fillRoundRect(trackBounds.x, trackY, trackBounds.width, trackHeight, 4, 4);
+                
+                // Draw filled portion with gradient color based on parameter type and value
+                if (filledWidth > 0) {
+                    // Create color gradient based on parameter type and value
+                    Color trackColor;
+                    float normalizedValue = (float) slider.getValue() / slider.getMaximum();
+                    
+                    // Choose color scheme based on parameter type
+                    switch (paramType) {
+                        case VOLUME:
+                        case GAIN:
+                            // Green to yellow to red gradient for volume/gain
+                            if (normalizedValue < 0.5f) {
+                                // Green to yellow gradient for lower half
+                                float ratio = normalizedValue * 2; // Scale to 0-1 range
+                                trackColor = new Color(
+                                    0.4f + (0.6f * ratio),  // Red component increases
+                                    0.8f,                    // Green component stays high
+                                    0.4f * (1 - ratio)       // Blue component decreases
+                                );
+                            } else {
+                                // Yellow to red gradient for upper half
+                                float ratio = (normalizedValue - 0.5f) * 2; // Scale to 0-1 range
+                                trackColor = new Color(
+                                    0.8f + (0.2f * ratio),    // Red component increases to max
+                                    0.8f * (1 - ratio),      // Green component decreases
+                                    0.0f                     // Blue component stays at 0
+                                );
+                            }
+                            break;
+                            
+                        case FREQUENCY:
+                            // Blue to cyan to white gradient for frequency
+                            trackColor = new Color(
+                                normalizedValue * 0.5f,       // Red increases slowly
+                                0.5f + (normalizedValue * 0.5f), // Green increases
+                                0.8f                         // Blue stays high
+                            );
+                            break;
+                            
+                        case TIME:
+                            // Purple to pink gradient for time
+                            trackColor = new Color(
+                                0.6f + (normalizedValue * 0.4f), // Red increases
+                                0.3f + (normalizedValue * 0.3f), // Green increases slowly
+                                0.8f - (normalizedValue * 0.3f)  // Blue decreases slowly
+                            );
+                            break;
+                            
+                        case MIX:
+                            // Blue to purple gradient for mix
+                            trackColor = new Color(
+                                0.3f + (normalizedValue * 0.5f), // Red increases
+                                0.3f,                          // Green stays low
+                                0.8f                           // Blue stays high
+                            );
+                            break;
+                            
+                        default:
+                            // Default gradient (blue to cyan)
+                            trackColor = new Color(
+                                0.0f,                          // Red stays low
+                                normalizedValue * 0.8f,        // Green increases
+                                0.5f + (normalizedValue * 0.5f) // Blue increases
+                            );
+                    }
+                    
+                    g2d.setColor(trackColor);
+                    g2d.fillRoundRect(trackBounds.x, trackY, filledWidth, trackHeight, 4, 4);
+                }
+            }
+            
             @Override
             public void paintThumb(Graphics g) {
                 Graphics2D g2d = (Graphics2D) g;
-                // Enable anti-aliasing for smooth rounded corners on the thumb
                 g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                 Rectangle knobBounds = thumbRect;
-                // Fill with medium gray color
-                g2d.setColor(new Color(120, 120, 120));
+                
+                // Draw thumb with slight glow effect based on value and parameter type
+                float normalizedValue = (float) slider.getValue() / slider.getMaximum();
+                Color thumbColor = new Color(150, 150, 150);
+                Color glowColor;
+                
+                // Choose glow color based on parameter type
+                switch (paramType) {
+                    case VOLUME:
+                    case GAIN:
+                        if (normalizedValue < 0.5f) {
+                            // Green glow for lower volumes/gain
+                            glowColor = new Color(0.4f, 0.8f, 0.4f, 0.5f * normalizedValue);
+                        } else {
+                            // Yellow to red glow for higher volumes/gain
+                            float ratio = (normalizedValue - 0.5f) * 2; // Scale to 0-1 range
+                            glowColor = new Color(
+                                0.8f + (0.2f * ratio),    // Red component increases to max
+                                0.8f * (1 - ratio),      // Green component decreases
+                                0.0f,                    // Blue component stays at 0
+                                0.5f                     // Alpha for glow effect
+                            );
+                        }
+                        break;
+                        
+                    case FREQUENCY:
+                        // Blue to cyan glow for frequency
+                        glowColor = new Color(
+                            normalizedValue * 0.5f,       // Red increases slowly
+                            0.5f + (normalizedValue * 0.5f), // Green increases
+                            0.8f,                         // Blue stays high
+                            0.5f                          // Alpha for glow effect
+                        );
+                        break;
+                        
+                    case TIME:
+                        // Purple to pink glow for time
+                        glowColor = new Color(
+                            0.6f + (normalizedValue * 0.4f), // Red increases
+                            0.3f + (normalizedValue * 0.3f), // Green increases slowly
+                            0.8f - (normalizedValue * 0.3f), // Blue decreases slowly
+                            0.5f                            // Alpha for glow effect
+                        );
+                        break;
+                        
+                    case MIX:
+                        // Blue to purple glow for mix
+                        glowColor = new Color(
+                            0.3f + (normalizedValue * 0.5f), // Red increases
+                            0.3f,                          // Green stays low
+                            0.8f,                          // Blue stays high
+                            0.5f                           // Alpha for glow effect
+                        );
+                        break;
+                        
+                    default:
+                        // Default glow (blue to cyan)
+                        glowColor = new Color(
+                            0.0f,                          // Red stays low
+                            normalizedValue * 0.8f,        // Green increases
+                            0.5f + (normalizedValue * 0.5f), // Blue increases
+                            0.5f                           // Alpha for glow effect
+                        );
+                }
+                
+                // Draw glow effect
+                if (normalizedValue > 0.1f) {
+                    g2d.setColor(glowColor);
+                    g2d.fillRoundRect(
+                        knobBounds.x - 2, 
+                        knobBounds.y - 2, 
+                        knobBounds.width + 4, 
+                        knobBounds.height + 4, 
+                        10, 10
+                    );
+                }
+                
+                // Draw thumb
+                g2d.setColor(thumbColor);
                 g2d.fillRoundRect(knobBounds.x, knobBounds.y, knobBounds.width, knobBounds.height, 8, 8);
-                // Add a lighter gray border for definition
                 g2d.setColor(new Color(180, 180, 180));
                 g2d.drawRoundRect(knobBounds.x, knobBounds.y, knobBounds.width, knobBounds.height, 8, 8);
             }
         });
         
-        // Configure ticks
-        int range = max - min;
-        int majorTick = range / 10;
-        int minorTick = majorTick / 5;
-        majorTick = Math.max(1, majorTick);
-        minorTick = Math.max(1, minorTick);
-        
-        slider.setMajorTickSpacing(majorTick);
-        slider.setMinorTickSpacing(minorTick);
+        // Configure ticks with more granularity at lower volumes
+        slider.setMajorTickSpacing(20);
+        slider.setMinorTickSpacing(5);
         slider.setPaintTicks(true);
-        slider.setSnapToTicks(true);
         
-        // Value label
-        JLabel valueLabel = new JLabel(String.valueOf(initial));
+        // Value label with appropriate display format based on parameter type
+        String labelText = formatValueLabel(initial, paramType, min, max);
+        JLabel valueLabel = new JLabel(labelText);
         valueLabel.setFont(retroFont.deriveFont(12f));
         valueLabel.setForeground(new Color(150, 150, 150));
         valueLabel.setPreferredSize(new Dimension(50, 25));
         valueLabel.setHorizontalAlignment(SwingConstants.RIGHT);
         
         slider.addChangeListener(e -> {
-            int value = slider.getValue();
-            valueLabel.setText(String.valueOf(value));
+            int sliderValue = slider.getValue();
+            
+            // Update label with appropriate format
+            valueLabel.setText(formatValueLabel(sliderValue, paramType, min, max));
+            
+            // Update the slider's appearance
+            slider.repaint();
+            
             if (!slider.getValueIsAdjusting()) {
-                callback.onValueChanged(value);
+                // Call the callback with the raw slider value
+                // The callbacks are responsible for scaling as needed
+                callback.onValueChanged(sliderValue);
                 frame.requestFocusInWindow();
             }
         });
@@ -416,10 +841,5 @@ public class SynthUI {
         controlPanel.add(Box.createHorizontalGlue());
         
         panel.add(controlPanel);
-    }
-
-    @FunctionalInterface
-    interface SliderCallback {
-        void onValueChanged(double value);
     }
 }

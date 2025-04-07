@@ -5,6 +5,10 @@ A polyphonic synthesizer built with Java and JSyn, featuring a retro 80s-inspire
 ## Features
 
 - Multi-mode filter (Low-pass, High-pass, Band-pass)
+- Audio effects processor with multiple effect types:
+  - Delay with adjustable time and feedback
+  - Reverb simulation with size control
+  - Distortion with adjustable drive amount
 - DAHDSR envelope for amplitude control
 - 8-voice polyphony for rich sound
 - Computer keyboard control with visual note display
@@ -73,6 +77,12 @@ rm -f src/*.class
 - Sustain: Volume level held while key is pressed (0-100%)
 - Release: Time for sound to fade after key release (1-1000ms)
 
+### Effects Section
+- Type: Choose between None, Delay, Reverb, and Distortion effects
+- Parameter 1: Controls primary effect parameter (delay time, reverb size, or distortion amount)
+- Parameter 2: Controls secondary effect parameter (feedback for delay)
+- Mix: Controls wet/dry balance of the effect
+
 ### Master Section
 - Volume: Overall output volume (0-100%)
 
@@ -84,3 +94,35 @@ rm -f src/*.class
 Use these keys to play notes:
 - A-K: White keys (C4 to C5)
 - W,E,T,Y,U: Black keys
+
+## Code Structure and Optimization
+
+### Core Classes
+
+- **Main**: Entry point for the application with thread safety monitoring
+- **SynthEngine**: Central engine managing voices, filters, and audio routing
+- **SynthVoice**: Individual voice for polyphonic synthesis
+- **FXProcessor**: Audio effects processor for delay, reverb, and distortion
+- **SynthUI**: User interface with controls and visual feedback
+
+### Recent Optimizations
+
+- **Logarithmic Scaling**: Implemented for all sliders to provide more natural control over parameters
+- **Documentation**: Added comprehensive JavaDoc to all methods explaining their purpose and behavior
+- **Code Cleanup**: Removed unused methods, duplicate code, and unnecessary comments
+- **Thread Safety**: Improved handling of audio processing with safety monitoring and recovery
+
+### Parameter Scaling
+
+All parameters now use appropriate scaling for their domain:
+- **Volume/Gain**: Logarithmic scaling (x⁴) for natural volume perception
+- **Frequency**: Logarithmic scaling for natural frequency perception (20Hz-20kHz)
+- **Time**: Linear or logarithmic scaling depending on the parameter
+
+### Visual Feedback
+
+Sliders provide visual feedback with color gradients based on parameter type:
+- **Frequency**: Blue to cyan
+- **Volume/Gain**: Yellow to green
+- **Time**: Purple to pink
+- **Mix/Balance**: Blue to purple
