@@ -1,6 +1,6 @@
 # Java Synthesizer
 
-A polyphonic synthesizer built with Java and JSyn, featuring a retro 80s-inspired UI design.
+A polyphonic synthesizer built with Java and JSyn, featuring a simple retro 80s-inspired UI design.
 
 ## Features
 
