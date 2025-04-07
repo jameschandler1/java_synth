@@ -4,10 +4,14 @@ import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.plaf.basic.BasicSliderUI;
 import java.awt.*;
-import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.awt.KeyboardFocusManager;
+import java.awt.KeyEventDispatcher;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.ArrayList;
 import java.awt.geom.RoundRectangle2D;
 import java.io.File;
 import java.io.IOException;
@@ -25,11 +29,14 @@ public class SynthUI {
         TIME,       // Time-based controls (ms, seconds)
         RESONANCE,  // Resonance/Q controls (0-100%)
         GAIN,       // Gain controls (0-100%)
-        MIX         // Mix/balance controls (0-100%)
+        MIX,        // Mix/balance controls (0-100%)
+        RATE        // Rate controls (Hz, frequency of modulation)
     }
     private JFrame frame;
     private SynthEngine engine;
     private HashMap<Integer, Integer> keyboardMapping;
+    // Set to track currently pressed keys to prevent stuck notes
+    private Set<Integer> activeKeys = new HashSet<>();
     // Map to store MIDI note numbers to their corresponding note names (e.g., 60 -> "C4")
     private HashMap<Integer, String> noteNames;
     
@@ -196,9 +203,38 @@ public class SynthUI {
         mainPanel.setMinimumSize(new Dimension(400, 600));
 
         // Create section panels
+        JPanel oscillatorSection = createSection("Oscillator");
         JPanel filterSection = createSection("Filter");
         JPanel envelopeSection = createSection("Envelope");
         JPanel masterSection = createSection("Master");
+        
+        // Add oscillator type selector
+        JPanel oscillatorTypePanel = new JPanel();
+        oscillatorTypePanel.setLayout(new BoxLayout(oscillatorTypePanel, BoxLayout.X_AXIS));
+        oscillatorTypePanel.setOpaque(false);
+        oscillatorTypePanel.setBorder(new EmptyBorder(5, 5, 5, 5));
+        oscillatorTypePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        oscillatorTypePanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 35));
+        
+        JLabel oscLabel = new JLabel("Waveform");
+        oscLabel.setForeground(new Color(200, 200, 200));
+        oscLabel.setPreferredSize(new Dimension(80, 25));
+        oscillatorTypePanel.add(oscLabel);
+        oscillatorTypePanel.add(Box.createHorizontalStrut(10));
+        
+        // Create array of oscillator types
+        SynthVoice.OscillatorType[] oscTypes = SynthVoice.OscillatorType.values();
+        JComboBox<SynthVoice.OscillatorType> oscTypeCombo = new JComboBox<>(oscTypes);
+        oscTypeCombo.setSelectedItem(engine.getCurrentOscillatorType());
+        oscTypeCombo.addActionListener(e -> {
+            SynthVoice.OscillatorType selectedType = (SynthVoice.OscillatorType) oscTypeCombo.getSelectedItem();
+            engine.setOscillatorType(selectedType);
+            SwingUtilities.invokeLater(() -> frame.requestFocusInWindow());
+        });
+        oscillatorTypePanel.add(oscTypeCombo);
+        oscillatorTypePanel.add(Box.createHorizontalGlue());
+        
+        oscillatorSection.add(oscillatorTypePanel);
 
         // Add filter type selector
         JPanel filterTypePanel = new JPanel();
@@ -224,8 +260,13 @@ public class SynthUI {
         JComboBox<SynthEngine.FilterType> filterTypeCombo = new JComboBox<>(filterTypes);
         filterTypeCombo.setSelectedItem(engine.getCurrentFilterType());
         filterTypeCombo.addActionListener(e -> {
-            engine.setFilterType((SynthEngine.FilterType) filterTypeCombo.getSelectedItem());
-            frame.requestFocusInWindow();
+            SynthEngine.FilterType selectedType = (SynthEngine.FilterType) filterTypeCombo.getSelectedItem();
+            engine.setFilterType(selectedType);
+            
+            // Adjust control ranges based on filter type
+            updateControlsForFilterType(selectedType);
+            
+            SwingUtilities.invokeLater(() -> frame.requestFocusInWindow());
         });
         filterTypePanel.add(filterTypeCombo);
         filterTypePanel.add(Box.createHorizontalGlue());
@@ -233,24 +274,32 @@ public class SynthUI {
         filterSection.add(filterTypePanel);
 
         // Add filter controls with logarithmic scaling for more natural control
-        addLogSlider(filterSection, "Cutoff", 20, 20000, 2000, ParameterType.FREQUENCY, 
+        // Traditional synth filter range: 20Hz - 20kHz with default at 1kHz
+        addLogSlider(filterSection, "Cutoff", 20, 20000, 1000, ParameterType.FREQUENCY, 
             value -> engine.setCutoff(value));
-        addLogSlider(filterSection, "Resonance", 0, 100, 5, ParameterType.RESONANCE, 
+        // Traditional resonance range: 0.0 - 1.0 with default at 0.1 (10%)
+        addLogSlider(filterSection, "Resonance", 0, 100, 10, ParameterType.RESONANCE, 
             value -> engine.setResonance(value / 100.0));
 
         // Add envelope controls with logarithmic scaling for more natural time response
-        addLogSlider(envelopeSection, "Attack", 1, 1000, 80, ParameterType.TIME, 
+        // Traditional synth ADSR ranges:
+        // Attack: 1ms - 5000ms (5 sec) with default at 10ms
+        addLogSlider(envelopeSection, "Attack", 1, 5000, 10, ParameterType.TIME, 
             value -> engine.setEnvelopeAttack(value / 1000.0));
-        addLogSlider(envelopeSection, "Decay", 1, 1000, 200, ParameterType.TIME, 
+        // Decay: 1ms - 5000ms (5 sec) with default at 200ms
+        addLogSlider(envelopeSection, "Decay", 1, 5000, 200, ParameterType.TIME, 
             value -> engine.setEnvelopeDecay(value / 1000.0));
+        // Sustain: 0-100% with default at 70%
         addLogSlider(envelopeSection, "Sustain", 0, 100, 70, ParameterType.GAIN, 
             value -> engine.setEnvelopeSustain(value / 100.0));
-        addLogSlider(envelopeSection, "Release", 1, 1000, 300, ParameterType.TIME, 
+        // Release: 1ms - 10000ms (10 sec) with default at 300ms
+        addLogSlider(envelopeSection, "Release", 1, 10000, 300, ParameterType.TIME, 
             value -> engine.setEnvelopeRelease(value / 1000.0));
 
         // Add master controls with logarithmic volume slider for better control
-        addLogSlider(masterSection, "Volume", 0, 100, 70, ParameterType.VOLUME, 
-            value -> engine.setMasterVolume(value / 100.0));
+        // Enhanced master volume: 0-150% with default at 70%
+        addLogSlider(masterSection, "Volume", 0, 150, 70, ParameterType.VOLUME, 
+            value -> engine.setMasterVolume(value / 30.0)); // Scale 0-150 to 0-5.0 range
 
         // Create a dedicated panel to display the currently pressed note
         JPanel noteDisplayPanel = createSection("Current Note");
@@ -305,7 +354,7 @@ public class SynthUI {
         delayToggle.addActionListener(e -> {
             boolean isSelected = delayToggle.isSelected();
             engine.enableDelayEffect(isSelected);
-            frame.requestFocusInWindow();
+            SwingUtilities.invokeLater(() -> frame.requestFocusInWindow());
         });
         
         JToggleButton reverbToggle = new JToggleButton("Reverb");
@@ -315,7 +364,7 @@ public class SynthUI {
         reverbToggle.addActionListener(e -> {
             boolean isSelected = reverbToggle.isSelected();
             engine.enableReverbEffect(isSelected);
-            frame.requestFocusInWindow();
+            SwingUtilities.invokeLater(() -> frame.requestFocusInWindow());
         });
         
         JToggleButton distortionToggle = new JToggleButton("Dist");
@@ -325,7 +374,17 @@ public class SynthUI {
         distortionToggle.addActionListener(e -> {
             boolean isSelected = distortionToggle.isSelected();
             engine.enableDistortionEffect(isSelected);
-            frame.requestFocusInWindow();
+            SwingUtilities.invokeLater(() -> frame.requestFocusInWindow());
+        });
+        
+        JToggleButton chorusToggle = new JToggleButton("Chorus");
+        chorusToggle.setFont(retroFont.deriveFont(12f));
+        chorusToggle.setMaximumSize(new Dimension(80, 25));
+        chorusToggle.setPreferredSize(new Dimension(80, 25));
+        chorusToggle.addActionListener(e -> {
+            boolean isSelected = chorusToggle.isSelected();
+            engine.enableChorusEffect(isSelected);
+            SwingUtilities.invokeLater(() -> frame.requestFocusInWindow());
         });
         
         effectTogglePanel.add(delayToggle);
@@ -333,6 +392,8 @@ public class SynthUI {
         effectTogglePanel.add(reverbToggle);
         effectTogglePanel.add(Box.createHorizontalStrut(5));
         effectTogglePanel.add(distortionToggle);
+        effectTogglePanel.add(Box.createHorizontalStrut(5));
+        effectTogglePanel.add(chorusToggle);
         effectTogglePanel.add(Box.createHorizontalGlue());
         
         effectsSection.add(effectTogglePanel);
@@ -352,14 +413,17 @@ public class SynthUI {
         ));
         
         // Delay time control with logarithmic scaling for more natural time response
-        addLogSlider(delayPanel, "Time", 1, 200, 30, ParameterType.TIME, value -> {
-            // Convert 1-200 to 0.01-2.0 seconds
-            engine.setDelayTime(value / 100.0);
+        // Traditional delay time: 10ms - 2000ms (2 sec) with default at 300ms
+        addLogSlider(delayPanel, "Time", 10, 2000, 300, ParameterType.TIME, value -> {
+            // Convert ms to seconds
+            engine.setDelayTime(value / 1000.0);
         });
         
         // Delay feedback control with logarithmic scaling for more natural response
-        addLogSlider(delayPanel, "Feedback", 0, 95, 40, ParameterType.GAIN, value -> {
-            // Convert 0-95 to 0.0-0.95 feedback amount
+        // Traditional delay feedback: 0-90% with default at 40%
+        // Limiting to 90% to prevent runaway feedback
+        addLogSlider(delayPanel, "Feedback", 0, 90, 40, ParameterType.GAIN, value -> {
+            // Convert 0-90 to 0.0-0.9 feedback amount
             engine.setDelayFeedback(value / 100.0);
         });
         
@@ -391,6 +455,7 @@ public class SynthUI {
         delaySyncPanel.add(syncToggle);
         delaySyncPanel.add(Box.createHorizontalGlue());
         // Delay wet/dry mix control
+        // Traditional wet/dry mix: 0-100% with default at 50%
         addLogSlider(delayPanel, "Mix", 0, 100, 50, ParameterType.MIX, 
             value -> engine.setDelayWetDryMix(value / 100.0));
             
@@ -413,22 +478,26 @@ public class SynthUI {
         ));
         
         // Reverb size control with logarithmic scaling for more natural response
+        // Traditional reverb size: 0-100% with default at 50%
         addLogSlider(reverbPanel, "Size", 0, 100, 50, ParameterType.GAIN, value -> {
             engine.setReverbSize(value / 100.0);
         });
         
         // Reverb decay control with logarithmic scaling for more natural time response
-        addLogSlider(reverbPanel, "Decay", 0, 100, 60, ParameterType.TIME, value -> {
-            engine.setReverbDecay(value / 100.0);
+        // Traditional reverb decay: 0.1-10 seconds with default at 1.5 seconds
+        addLogSlider(reverbPanel, "Decay", 100, 10000, 1500, ParameterType.TIME, value -> {
+            engine.setReverbDecay(value / 1000.0);
         });
         
         // Reverb gain control with logarithmic scaling for more natural response
+        // Traditional reverb gain: 0-100% with default at 80%
         addLogSlider(reverbPanel, "Gain", 0, 100, 80, ParameterType.GAIN, value -> {
             engine.setReverbGain(value / 100.0);
         });
         
         // Reverb wet/dry mix control with logarithmic scaling
-        addLogSlider(reverbPanel, "Mix", 0, 100, 50, ParameterType.MIX, 
+        // Traditional reverb mix: 0-100% with default at 30%
+        addLogSlider(reverbPanel, "Mix", 0, 100, 30, ParameterType.MIX, 
             value -> engine.setReverbWetDryMix(value / 100.0));
             
         effectsSection.add(reverbPanel);
@@ -448,17 +517,64 @@ public class SynthUI {
         ));
         
         // Distortion gain control with logarithmic scaling for more natural response
-        addLogSlider(distortionPanel, "Gain", 0, 100, 50, ParameterType.GAIN, value -> {
+        // Traditional distortion drive: 0-100% with default at 30%
+        addLogSlider(distortionPanel, "Drive", 0, 100, 30, ParameterType.GAIN, value -> {
             engine.setDistortionAmount(value / 100.0);
         });
         
         // Distortion wet/dry mix control with logarithmic scaling
+        // Traditional distortion mix: 0-100% with default at 50%
         addLogSlider(distortionPanel, "Mix", 0, 100, 50, ParameterType.MIX, 
             value -> engine.setDistortionWetDryMix(value / 100.0));
             
         effectsSection.add(distortionPanel);
         
+        // Chorus controls
+        JPanel chorusPanel = new JPanel();
+        chorusPanel.setLayout(new BoxLayout(chorusPanel, BoxLayout.Y_AXIS));
+        chorusPanel.setOpaque(false);
+        chorusPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        chorusPanel.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(new Color(100, 100, 100), 1, true),
+            "Chorus",
+            0,
+            0,
+            retroFont.deriveFont(12f),
+            new Color(180, 180, 180)
+        ));
+        
+        // Chorus rate control with logarithmic scaling for more natural response
+        // Standard chorus rate: 0.5-5 Hz with default at 0.8 Hz (typical vintage chorus)
+        addLogSlider(chorusPanel, "Rate", 50, 500, 80, ParameterType.FREQUENCY, value -> {
+            // Convert 50-500 to 0.5-5.0 Hz
+            double rate = value / 100.0;
+            engine.setChorusRate(rate / 1.67); // Scale to 0-3 range
+            System.out.println("Chorus rate set to: " + rate + " Hz");
+        });
+        
+        // Chorus depth control with logarithmic scaling for more natural response
+        // Standard chorus depth: 0-100% with default at 25% (typical vintage chorus)
+        addLogSlider(chorusPanel, "Depth", 0, 100, 25, ParameterType.GAIN, value -> {
+            // Convert 0-100 to 0.0-3.0 depth amount
+            double depth = value / 33.33; // Scale to 0-3 range
+            engine.setChorusDepth(depth);
+            System.out.println("Chorus depth set to: " + value + "%");
+        });
+        
+        // Chorus wet/dry mix control with logarithmic scaling
+        // Standard chorus mix: 0-100% with default at 35% (typical vintage chorus)
+        addLogSlider(chorusPanel, "Mix", 0, 100, 35, ParameterType.MIX, 
+            value -> {
+                double mix = value / 33.33; // Scale to 0-3 range
+                engine.setChorusWetDryMix(mix);
+                System.out.println("Chorus mix set to: " + value + "%");
+            });
+            
+        effectsSection.add(chorusPanel);
+        
         // Add sections to main panel with proper spacing
+        mainPanel.add(oscillatorSection);
+        mainPanel.add(Box.createVerticalStrut(15));
         mainPanel.add(filterSection);
         mainPanel.add(Box.createVerticalStrut(15));
         mainPanel.add(envelopeSection);
@@ -470,29 +586,56 @@ public class SynthUI {
         mainPanel.add(noteDisplayPanel);
         mainPanel.add(Box.createVerticalGlue());
 
-        // Add keyboard listener
-        frame.addKeyListener(new KeyAdapter() {
+        // Use KeyboardFocusManager to capture all key events regardless of focus
+        // This is more reliable than component-level key listeners, especially with dropdowns
+        KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(new KeyEventDispatcher() {
             @Override
-            public void keyPressed(KeyEvent e) {
-                Integer note = keyboardMapping.get(e.getKeyCode());
-                if (note != null) {
-                    engine.noteOn(note, 0.8);
-                    // Update the note display with the current note name
-                    String noteName = noteNames.get(note);
-                    if (noteName != null) {
-                        currentNoteLabel.setText(noteName); // Show the note being played
+            public boolean dispatchKeyEvent(KeyEvent e) {
+                // Process all key events when our frame is active, regardless of which component has focus
+                if (frame.isActive()) {
+                    if (e.getID() == KeyEvent.KEY_PRESSED) {
+                        Integer note = keyboardMapping.get(e.getKeyCode());
+                        if (note != null && !activeKeys.contains(e.getKeyCode())) {
+                            // Only trigger note if key wasn't already pressed
+                            activeKeys.add(e.getKeyCode());
+                            engine.noteOn(note, 0.8);
+                            // Update the note display with the current note name
+                            String noteName = noteNames.get(note);
+                            if (noteName != null) {
+                                currentNoteLabel.setText(noteName); // Show the note being played
+                            }
+                        }
+                    } else if (e.getID() == KeyEvent.KEY_RELEASED) {
+                        Integer note = keyboardMapping.get(e.getKeyCode());
+                        if (note != null) {
+                            // Remove from active keys set
+                            activeKeys.remove(e.getKeyCode());
+                            engine.noteOff(note);
+                            // Reset the note display when key is released
+                            if (activeKeys.isEmpty()) {
+                                currentNoteLabel.setText("Press a key");
+                            }
+                        }
                     }
                 }
+                // Return false to allow the event to be processed by other listeners
+                return false;
             }
-
+        });
+        
+        // Add window focus listener to release all notes when window loses focus
+        frame.addWindowFocusListener(new WindowAdapter() {
             @Override
-            public void keyReleased(KeyEvent e) {
-                Integer note = keyboardMapping.get(e.getKeyCode());
-                if (note != null) {
-                    engine.noteOff(note);
-                    // Reset the note display when key is released
-                    currentNoteLabel.setText("Press a key");
+            public void windowLostFocus(WindowEvent e) {
+                // Release all active notes when window loses focus
+                for (Integer keyCode : new ArrayList<>(activeKeys)) {
+                    Integer note = keyboardMapping.get(keyCode);
+                    if (note != null) {
+                        engine.noteOff(note);
+                    }
                 }
+                activeKeys.clear();
+                currentNoteLabel.setText("Press a key");
             }
         });
 
@@ -503,6 +646,121 @@ public class SynthUI {
         frame.pack();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
+    }
+    
+    /**
+     * Updates control ranges based on the selected filter type.
+     * Different filter types work best with different parameter ranges.
+     * 
+     * @param filterType The currently selected filter type
+     */
+    private void updateControlsForFilterType(SynthEngine.FilterType filterType) {
+        // Find the cutoff and resonance sliders
+        Component[] components = frame.getContentPane().getComponents();
+        JSlider cutoffSlider = null;
+        JSlider resonanceSlider = null;
+        
+        // Search through all components to find our sliders
+        for (Component c : components) {
+            if (c instanceof JScrollPane) {
+                JScrollPane scrollPane = (JScrollPane) c;
+                if (scrollPane.getViewport().getView() instanceof JPanel) {
+                    JPanel containerPanel = (JPanel) scrollPane.getViewport().getView();
+                    if (containerPanel.getComponent(0) instanceof JPanel) {
+                        JPanel mainPanel = (JPanel) containerPanel.getComponent(0);
+                        
+                        // Search through the main panel components
+                        for (Component section : mainPanel.getComponents()) {
+                            if (section instanceof JPanel) {
+                                JPanel sectionPanel = (JPanel) section;
+                                // Check if this is the filter section
+                                if (sectionPanel.getBorder() instanceof javax.swing.border.TitledBorder) {
+                                    javax.swing.border.TitledBorder border = 
+                                        (javax.swing.border.TitledBorder) sectionPanel.getBorder();
+                                    if (border.getTitle().equals("Filter")) {
+                                        // Found the filter section, now find the sliders
+                                        for (Component control : sectionPanel.getComponents()) {
+                                            if (control instanceof JPanel) {
+                                                for (Component c2 : ((JPanel) control).getComponents()) {
+                                                    if (c2 instanceof JSlider) {
+                                                        JSlider slider = (JSlider) c2;
+                                                        String name = slider.getName();
+                                                        if (name != null) {
+                                                            if (name.equals("Cutoff")) {
+                                                                cutoffSlider = slider;
+                                                            } else if (name.equals("Resonance")) {
+                                                                resonanceSlider = slider;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Adjust ranges based on filter type if sliders were found
+        if (cutoffSlider != null) {
+            int currentValue = cutoffSlider.getValue();
+            double currentPct = (double)currentValue / cutoffSlider.getMaximum();
+            
+            switch (filterType) {
+                case LOWPASS:
+                    // For lowpass, emphasize lower frequencies
+                    cutoffSlider.setMaximum(20000);
+                    // Set default to 1kHz for lowpass
+                    int newLowpassValue = (int)(currentPct * 20000);
+                    cutoffSlider.setValue(Math.max(20, Math.min(20000, newLowpassValue)));
+                    break;
+                    
+                case HIGHPASS:
+                    // For highpass, emphasize mid-high frequencies
+                    cutoffSlider.setMaximum(15000);
+                    // Set default to 5kHz for highpass
+                    int newHighpassValue = (int)(currentPct * 15000);
+                    cutoffSlider.setValue(Math.max(200, Math.min(15000, newHighpassValue)));
+                    break;
+                    
+                case BANDPASS:
+                    // For bandpass, focus on mid-range frequencies
+                    cutoffSlider.setMaximum(10000);
+                    // Set default to 2kHz for bandpass
+                    int newBandpassValue = (int)(currentPct * 10000);
+                    cutoffSlider.setValue(Math.max(100, Math.min(10000, newBandpassValue)));
+                    break;
+            }
+        }
+        
+        if (resonanceSlider != null) {
+            int currentValue = resonanceSlider.getValue();
+            double currentPct = (double)currentValue / resonanceSlider.getMaximum();
+            
+            switch (filterType) {
+                case LOWPASS:
+                    // Lowpass typically uses moderate resonance
+                    resonanceSlider.setMaximum(100);
+                    resonanceSlider.setValue((int)(currentPct * 100));
+                    break;
+                    
+                case HIGHPASS:
+                    // Highpass typically uses less resonance to avoid harshness
+                    resonanceSlider.setMaximum(80);
+                    resonanceSlider.setValue((int)(currentPct * 80));
+                    break;
+                    
+                case BANDPASS:
+                    // Bandpass can use higher resonance for more pronounced effect
+                    resonanceSlider.setMaximum(120);
+                    resonanceSlider.setValue((int)(currentPct * 120));
+                    break;
+            }
+        }
     }
 
     /**
@@ -810,6 +1068,19 @@ public class SynthUI {
         slider.setMinorTickSpacing(5);
         slider.setPaintTicks(true);
         
+        // Set the name of the slider to match its label for later identification
+        slider.setName(label);
+        
+        // Enable snap-to-ticks to prevent continuous value changes that might cause buffer issues
+        slider.setSnapToTicks(true);
+        
+        // For time-based parameters, use larger snap increments to further reduce buffer issues
+        if (paramType == ParameterType.TIME) {
+            // For time sliders, use larger increments to prevent buffer overruns
+            int snapIncrement = Math.max((max - min) / 30, 10); // At most 30 discrete values, minimum 10ms
+            slider.setMinorTickSpacing(snapIncrement);
+        }
+        
         // Value label with appropriate display format based on parameter type
         String labelText = formatValueLabel(initial, paramType, min, max);
         JLabel valueLabel = new JLabel(labelText);
@@ -827,11 +1098,28 @@ public class SynthUI {
             // Update the slider's appearance
             slider.repaint();
             
+            // Throttle updates to prevent buffer overruns and thread exceptions
+            // Only update when the user releases the slider or at most every 50ms during dragging
             if (!slider.getValueIsAdjusting()) {
-                // Call the callback with the raw slider value
+                // Call the callback with the raw slider value when slider is released
                 // The callbacks are responsible for scaling as needed
                 callback.onValueChanged(sliderValue);
-                frame.requestFocusInWindow();
+                
+                // Return focus to the frame but don't trigger key release events
+                SwingUtilities.invokeLater(() -> frame.requestFocusInWindow());
+            } else {
+                // During dragging, use a timer to throttle updates
+                // This prevents too many rapid changes that could cause buffer issues
+                if (paramType == ParameterType.TIME || paramType == ParameterType.FREQUENCY) {
+                    // Use a more aggressive throttling for time and frequency parameters
+                    // as these are more likely to cause buffer issues
+                    Timer timer = new Timer(50, event -> {
+                        callback.onValueChanged(slider.getValue());
+                        ((Timer)event.getSource()).stop();
+                    });
+                    timer.setRepeats(false);
+                    timer.start();
+                }
             }
         });
 

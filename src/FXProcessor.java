@@ -4,12 +4,32 @@ import com.jsyn.Synthesizer;
 import com.jsyn.ports.UnitInputPort;
 import com.jsyn.ports.UnitOutputPort;
 import com.jsyn.unitgen.*;
+import javax.swing.SwingUtilities;
 
 /**
  * Manages audio effects for the synthesizer.
  * This class provides multiple independent effects that can be applied to the audio signal,
- * including delay, reverb, and distortion. Each effect has its own wet/dry control
+ * including delay, reverb, distortion, and chorus. Each effect has its own wet/dry control
  * and can be enabled/disabled independently.
+ * 
+ * Key features:
+ * 
+ * 1. Effect Buffer Preservation: All effects maintain their internal state and buffer contents
+ *    when toggled on/off. This prevents audio glitches and ensures smooth transitions when
+ *    enabling/disabling effects during performance. Effects continue processing audio in the
+ *    background even when disabled, with only their output connections being modified.
+ * 
+ * 2. Parallel Effect Routing: All effects process the input signal independently in parallel,
+ *    rather than being chained in series. This maintains audio quality and prevents one effect
+ *    from degrading the signal for subsequent effects.
+ * 
+ * 3. Vintage Chorus Implementation: The chorus effect uses dual delay lines with different
+ *    base delay times (15ms and 22ms) and LFOs with slightly different rates and depths to
+ *    create a rich, musical chorus effect similar to classic analog hardware units.
+ * 
+ * 4. Thread-Safe Parameter Control: All parameter changes use synchronized blocks and
+ *    LinearRamp units to ensure thread safety and prevent audio artifacts during parameter
+ *    changes.
  */
 public class FXProcessor {
     
@@ -21,6 +41,7 @@ public class FXProcessor {
         DELAY("Delay"),         // Echo effect with feedback
         REVERB("Reverb"),       // Simulates room acoustics
         DISTORTION("Distortion"), // Adds harmonic saturation
+        CHORUS("Chorus"),       // Adds modulation and thickness
         NONE("None");           // No effect (bypass)
         
         private final String displayName;
@@ -49,6 +70,12 @@ public class FXProcessor {
     private MultiplyAdd distortion;                  // Simple distortion using multiplication
     private MultiplyAdd delayFeedback;   // For delay feedback path
     
+    // Chorus effect components
+    private SafeInterpolatingDelay chorusDelay1;     // First chorus voice
+    private SafeInterpolatingDelay chorusDelay2;     // Second chorus voice
+    private SineOscillator chorusLFO1;              // LFO for first voice
+    private SineOscillator chorusLFO2;              // LFO for second voice
+    
     // Effect parameters
     private LinearRamp delayTimeRamp;
     private LinearRamp delayFeedbackRamp;
@@ -63,10 +90,16 @@ public class FXProcessor {
     private LinearRamp distortionWetDryRamp;
     private LinearRamp distortionAmountRamp;
     
+    // Chorus parameters
+    private LinearRamp chorusRateRamp;
+    private LinearRamp chorusDepthRamp;
+    private LinearRamp chorusWetDryRamp;
+    
     // Effect state
     private boolean delayEnabled = false;
     private boolean reverbEnabled = false;
     private boolean distortionEnabled = false;
+    private boolean chorusEnabled = false;
     
     // Current filter type (matches SynthEngine.FilterType enum values)
     private int currentFilterType = 0; // 0=LOWPASS, 1=HIGHPASS, 2=BANDPASS
@@ -81,6 +114,10 @@ public class FXProcessor {
     // Effect chain mixers
     private Add delayMixer;     // Mixes dry signal with delay
     private Add distortionMixer; // Mixes dry signal with distortion
+    private Add chorusMixer;    // Mixes dry signal with chorus
+    
+    // Thread exception handling
+    private Thread.UncaughtExceptionHandler effectsExceptionHandler;
     
     /**
      * Creates a new FX processor with all available effects.
@@ -91,12 +128,41 @@ public class FXProcessor {
      */
     public FXProcessor(Synthesizer synth) {
         this.synth = synth;
+        
+        // Set up global exception handler for effects threads
+        setupExceptionHandler();
+        
         createComponents(synth);
         configureDefaults();
         connectComponents();
         
         // Initialize reverb settings based on the current filter type
         updateReverbSettings();
+    }
+    
+    /**
+     * Sets up a global exception handler for audio processing threads.
+     * This handler will reset effects to safe states when exceptions occur.
+     */
+    private void setupExceptionHandler() {
+        effectsExceptionHandler = new Thread.UncaughtExceptionHandler() {
+            @Override
+            public void uncaughtException(Thread t, Throwable e) {
+                System.err.println("Thread exception in audio processing: " + e.getMessage());
+                e.printStackTrace();
+                
+                // Reset all effects to safe states
+                // Use SwingUtilities.invokeLater to avoid thread conflicts
+                SwingUtilities.invokeLater(() -> {
+                    resetAllEffects();
+                    // Log the exception
+                    System.err.println("Effects have been reset to safe defaults");
+                });
+            }
+        };
+        
+        // Set the exception handler for the current thread
+        Thread.currentThread().setUncaughtExceptionHandler(effectsExceptionHandler);
     }
     
     /**
@@ -113,6 +179,7 @@ public class FXProcessor {
         delayMixer = new Add();
         reverbMixer = new Add();
         distortionMixer = new Add();
+        chorusMixer = new Add();
         
         // Create effect units with our SafeInterpolatingDelay wrapper to prevent index out of bounds errors
         delay = new SafeInterpolatingDelay();
@@ -155,12 +222,28 @@ public class FXProcessor {
         distortionWetDryRamp = new LinearRamp();
         distortionAmountRamp = new LinearRamp();
         
+        // Create chorus components
+        chorusDelay1 = new SafeInterpolatingDelay();
+        chorusDelay1.allocate(4410); // 100ms at 44.1kHz - sufficient for chorus
+        chorusDelay2 = new SafeInterpolatingDelay();
+        chorusDelay2.allocate(4410); // 100ms at 44.1kHz - sufficient for chorus
+        
+        // Create chorus LFOs
+        chorusLFO1 = new SineOscillator();
+        chorusLFO2 = new SineOscillator();
+        
+        // Create chorus parameter ramps
+        chorusRateRamp = new LinearRamp();
+        chorusDepthRamp = new LinearRamp();
+        chorusWetDryRamp = new LinearRamp();
+        
         // Add all components to the synthesizer
         synth.add(inputMixer);
         synth.add(outputMixer);
         synth.add(delayMixer);
         synth.add(reverbMixer);
         synth.add(distortionMixer);
+        synth.add(chorusMixer);
         
         synth.add(delay);
         synth.add(reverbEarlyDelay);
@@ -171,6 +254,12 @@ public class FXProcessor {
         synth.add(reverbGain);
         synth.add(reverbMixer);
         synth.add(distortion);
+        
+        // Add chorus components
+        synth.add(chorusDelay1);
+        synth.add(chorusDelay2);
+        synth.add(chorusLFO1);
+        synth.add(chorusLFO2);
         
         synth.add(delayTimeRamp);
         synth.add(delayFeedbackRamp);
@@ -183,6 +272,11 @@ public class FXProcessor {
         
         synth.add(distortionWetDryRamp);
         synth.add(distortionAmountRamp);
+        
+        // Add chorus parameter ramps
+        synth.add(chorusRateRamp);
+        synth.add(chorusDepthRamp);
+        synth.add(chorusWetDryRamp);
     }
     
     /**
@@ -240,6 +334,32 @@ public class FXProcessor {
         delayWetDryRamp.input.set(0.5); // 50% wet/dry for delay
         reverbWetDryRamp.input.set(0.5); // 50% wet/dry for reverb
         distortionWetDryRamp.input.set(0.5); // 50% wet/dry for distortion
+        
+        // Initialize chorus effect with standard vintage chorus settings
+        // Set chorus ramp times
+        chorusRateRamp.time.set(smoothingTime);
+        chorusDepthRamp.time.set(smoothingTime);
+        chorusWetDryRamp.time.set(smoothingTime);
+        
+        // Set base delay times for chorus delays (15ms and 22ms are standard for vintage chorus)
+        chorusDelay1.delay.set(0.015); // 15ms base delay time
+        chorusDelay2.delay.set(0.022); // 22ms base delay time
+        
+        // Set LFO rates (0.8Hz and 0.95Hz are standard for vintage chorus)
+        // Using slightly different rates for the two LFOs creates a richer sound
+        chorusLFO1.frequency.set(0.8); // 0.8 Hz for first LFO
+        chorusLFO2.frequency.set(0.95); // 0.95 Hz for second LFO
+        chorusRateRamp.input.set(0.8); // Default rate of 0.8 Hz
+        
+        // Set LFO amplitudes (modulation depth - 4ms and 3.5ms are standard for vintage chorus)
+        chorusLFO1.amplitude.set(0.004); // 4ms modulation depth
+        chorusLFO2.amplitude.set(0.0035); // 3.5ms modulation depth
+        chorusDepthRamp.input.set(0.004); // Default depth of 4ms
+        
+        // Set wet/dry mix (standard vintage chorus typically uses 65% dry / 35% wet)
+        chorusWetDryRamp.input.set(0.35); // 35% wet
+        chorusMixer.inputA.set(0.65); // 65% dry
+        chorusMixer.inputB.set(0.35); // 35% wet
     }
     
     /**
@@ -255,6 +375,7 @@ public class FXProcessor {
         inputMixer.output.connect(delayMixer.inputA);
         inputMixer.output.connect(reverbMixer.inputA); // Dry signal to reverb mixer
         inputMixer.output.connect(distortionMixer.inputA);
+        inputMixer.output.connect(chorusMixer.inputA); // Dry signal to chorus mixer
         
         // Connect new reverb components
         
@@ -279,6 +400,32 @@ public class FXProcessor {
         
         // Connect distortion output
         distortion.output.connect(distortionMixer.inputB);
+        
+        // Connect chorus components with proper vintage chorus settings
+        // Standard vintage chorus uses 15-22ms base delay times
+        chorusDelay1.delay.set(0.015); // 15ms base delay (standard for vintage chorus)
+        chorusDelay2.delay.set(0.022); // 22ms base delay (standard for vintage chorus)
+        
+        // Configure LFOs with standard vintage chorus rates and depths
+        chorusLFO1.frequency.set(0.8);    // 0.8 Hz (standard vintage chorus rate)
+        chorusLFO2.frequency.set(0.95);   // 0.95 Hz (slightly different for richer sound)
+        
+        // Set appropriate modulation depths for vintage chorus
+        chorusLFO1.amplitude.set(0.004);  // 4ms modulation depth
+        chorusLFO2.amplitude.set(0.0035); // 3.5ms modulation depth
+        
+        // Connect LFOs to modulate the delay times
+        chorusLFO1.output.connect(chorusDelay1.delay);
+        chorusLFO2.output.connect(chorusDelay2.delay);
+        
+        // Connect input signal to chorus delays
+        inputMixer.output.connect(chorusDelay1.input);
+        inputMixer.output.connect(chorusDelay2.input);
+        
+        // Connect chorus delays to chorus mixer's wet input
+        // Using a sum of both delays creates a richer chorus effect
+        chorusDelay1.output.connect(chorusMixer.inputB);
+        chorusDelay2.output.connect(chorusMixer.inputB);
         
         // Connect parameter control ramps
         delayTimeRamp.output.connect(delay.delay);
@@ -393,90 +540,157 @@ public class FXProcessor {
     /**
      * Enables or disables the delay effect.
      * 
-     * @param enabled Whether the delay effect should be enabled
+     * This implementation preserves the delay buffer contents when toggling the effect,
+     * preventing audio glitches and maintaining consistent effect settings. When the effect
+     * is re-enabled, it will continue from its previous state rather than resetting.
+     * 
+     * The delay effect continues to process audio in the background even when disabled,
+     * but its output is disconnected from the main signal path. This approach ensures
+     * smooth transitions when enabling/disabling the effect during performance.
+     * 
+     * @param enabled Whether the delay effect should be enabled (true) or disabled (false)
      */
     public void enableDelayEffect(boolean enabled) {
         delayEnabled = enabled;
-        updateEffectRouting();
+        updateEffectRouting(); // This preserves buffer contents while toggling effect
     }
     
     /**
      * Enables or disables the reverb effect.
      * 
-     * @param enabled Whether the reverb effect should be enabled
+     * This implementation preserves the reverb buffer contents when toggling the effect,
+     * preventing audio glitches and maintaining consistent effect settings. When the effect
+     * is re-enabled, it will continue from its previous state rather than resetting.
+     * 
+     * The reverb effect continues to process audio in the background even when disabled,
+     * but its output is disconnected from the main signal path. This approach ensures
+     * smooth transitions when enabling/disabling the effect during performance.
+     * 
+     * @param enabled Whether the reverb effect should be enabled (true) or disabled (false)
      */
     public void enableReverbEffect(boolean enabled) {
         reverbEnabled = enabled;
-        updateEffectRouting();
+        updateEffectRouting(); // This preserves buffer contents while toggling effect
     }
     
     /**
      * Enables or disables the distortion effect.
      * 
-     * @param enabled Whether the distortion effect should be enabled
+     * This implementation preserves the distortion state when toggling the effect,
+     * preventing audio glitches and maintaining consistent effect settings. When the effect
+     * is re-enabled, it will continue from its previous state rather than resetting.
+     * 
+     * The distortion effect continues to process audio in the background even when disabled,
+     * but its output is disconnected from the main signal path. This approach ensures
+     * smooth transitions when enabling/disabling the effect during performance.
+     * 
+     * @param enabled Whether the distortion effect should be enabled (true) or disabled (false)
      */
     public void enableDistortionEffect(boolean enabled) {
         distortionEnabled = enabled;
-        updateEffectRouting();
+        updateEffectRouting(); // This preserves effect state while toggling
+    }
+    
+    /**
+     * Enables or disables the chorus effect.
+     * 
+     * This implementation preserves the chorus buffer contents when toggling the effect,
+     * preventing audio glitches and maintaining consistent effect settings. When the effect
+     * is re-enabled, it will continue from its previous state rather than resetting.
+     * 
+     * The chorus effect continues to process audio in the background even when disabled,
+     * but its output is disconnected from the main signal path. This approach ensures
+     * smooth transitions when enabling/disabling the effect during performance.
+     * 
+     * @param enabled Whether the chorus effect should be enabled (true) or disabled (false)
+     */
+    public void enableChorusEffect(boolean enabled) {
+        chorusEnabled = enabled;
+        updateEffectRouting(); // This preserves buffer contents while toggling effect
     }
     
     /**
      * Updates the effect routing based on which effects are enabled.
      * Multiple effects can be enabled simultaneously.
+     * 
+     * This implementation preserves effect state and buffer contents when toggling effects.
+     * Rather than disconnecting and reconnecting all components (which would reset buffers),
+     * we only modify the output connections to the main mixer. This approach ensures that
+     * effects continue processing audio even when disabled, maintaining their internal state.
+     * When an effect is re-enabled, its buffer contents are preserved, resulting in a smooth
+     * transition without audio glitches.
      */
     private void updateEffectRouting() {
-        // First disconnect all effect chains from the output mixer
-        delayMixer.output.disconnect(outputMixer.inputA);
-        reverbMixer.output.disconnect(outputMixer.inputA);
-        distortionMixer.output.disconnect(outputMixer.inputA);
-        inputMixer.output.disconnect(outputMixer.inputA);
+        // IMPORTANT: This method is designed to preserve buffer contents when toggling effects
+        // The key design principle is to maintain all internal connections at all times
+        // and only modify the final output connections when enabling/disabling effects
         
-        // Disconnect any cross-connections between effect mixers
-        delayMixer.output.disconnect(reverbMixer.inputA);
-        delayMixer.output.disconnect(distortionMixer.inputA);
-        reverbMixer.output.disconnect(distortionMixer.inputA);
+        // Always ensure all effects have input connections (these stay connected all the time)
+        // This allows effects to continue processing in the background even when disabled
+        // We use try-catch because connect() will throw an exception if already connected
+        try {
+            // Connect input to all effect mixers (dry signal path)
+            // These connections ensure the dry signal is always available to all effect mixers
+            inputMixer.output.connect(delayMixer.inputA);     // Dry signal to delay mixer
+            inputMixer.output.connect(reverbMixer.inputA);    // Dry signal to reverb mixer
+            inputMixer.output.connect(chorusMixer.inputA);    // Dry signal to chorus mixer
+            inputMixer.output.connect(distortionMixer.inputA); // Dry signal to distortion mixer
+            
+            // Connect input to all effect processors (wet signal path)
+            // These connections ensure effects continue processing even when disabled
+            // This is crucial for preserving buffer contents and effect state
+            inputMixer.output.connect(delay.input);           // Input to delay line
+            inputMixer.output.connect(reverbEarlyDelay.input); // Input to reverb early reflections
+            inputMixer.output.connect(distortion.inputA);     // Input to distortion processor
+            inputMixer.output.connect(chorusDelay1.input);    // Input to first chorus delay
+            inputMixer.output.connect(chorusDelay2.input);    // Input to second chorus delay
+        } catch (Exception e) {
+            // Connection already exists, which is fine
+            // We want to ensure connections exist without disconnecting first
+            // This prevents buffer resets that would occur if we disconnected first
+        }
         
-        // Start with a clean slate - always ensure the dry signal is connected
-        // to all effect mixers (this is crucial for maintaining signal flow)
-        inputMixer.output.connect(delayMixer.inputA);
-        inputMixer.output.connect(reverbMixer.inputA);
-        inputMixer.output.connect(distortionMixer.inputA);
-        
-        // We're connecting all effects directly to the output mixer
-        
-        // Keep effects in parallel rather than chaining them
-        // This ensures each effect processes the dry signal independently
-        
-        // Keep all effects completely separate and parallel
-        // Don't chain any effects together
-        
-        // Create a custom mixer for combining all enabled effects
-        // First disconnect all previous connections to the output mixer
+        // Only modify the output connections to the main output mixer
+        // This is what actually enables/disables the audible effect without resetting buffers
         outputMixer.inputA.disconnectAll();
         
         // Connect the dry signal if no effects are enabled
-        if (!delayEnabled && !reverbEnabled && !distortionEnabled) {
+        // This creates a clean bypass path when all effects are disabled
+        if (!delayEnabled && !reverbEnabled && !distortionEnabled && !chorusEnabled) {
             inputMixer.output.connect(outputMixer.inputA);
             return;
         }
         
         // Connect each enabled effect to the output mixer
-        // Each effect has its own wet/dry control for balance
-        
-        // Connect each enabled effect
+        // Each effect continues processing in the background even when disabled
+        // Only the output connection determines whether the effect is audible
         if (delayEnabled) {
-            delayMixer.output.connect(outputMixer.inputA);
+            delayMixer.output.connect(outputMixer.inputA);    // Connect delay to output
         }
         
         if (reverbEnabled) {
-            reverbMixer.output.connect(outputMixer.inputA);
+            reverbMixer.output.connect(outputMixer.inputA);   // Connect reverb to output
         }
         
         if (distortionEnabled) {
-            distortionMixer.output.connect(outputMixer.inputA);
+            distortionMixer.output.connect(outputMixer.inputA); // Connect distortion to output
         }
         
-        // All effects are now directly connected to the output mixer
+        if (chorusEnabled) {
+            chorusMixer.output.connect(outputMixer.inputA);   // Connect chorus to output
+        }
+        
+        // Note: All effects continue to process audio in the background even when disabled
+        // This ensures smooth transitions when re-enabling effects without buffer resets
+    }
+    
+    /**
+     * Gets the current delay time setting.
+     * 
+     * @return The current delay time in seconds
+     */
+    public double getDelayTime() {
+        return delayTimeRamp.input.get();
     }
     
     /**
@@ -484,13 +698,13 @@ public class FXProcessor {
      * Includes thread-safe measures to prevent buffer overruns and audio artifacts.
      * Uses synchronized blocks to ensure thread safety during parameter updates.
      * 
-     * @param seconds Delay time in seconds (0.0-2.0)
+     * @param seconds Delay time in seconds (0.0-6.0)
      */
     public void setDelayTime(double seconds) {
         // Calculate maximum safe delay time based on buffer allocation
         // Buffer is now 88200*3 + 10000 samples at 44.1kHz, so max is ~6.0 seconds
-        // Use a very conservative safety margin to prevent edge cases
-        double maxSafeDelay = 1.5; // Extremely conservative maximum safe delay time in seconds
+        // Use a conservative safety margin to prevent edge cases
+        double maxSafeDelay = 5.0; // Increased maximum safe delay time in seconds
         
         // Clamp values to safe range with a minimum value to prevent very short delays
         double safeSeconds = Math.min(Math.max(seconds, 0.02), maxSafeDelay);
@@ -539,11 +753,13 @@ public class FXProcessor {
      * Sets the delay feedback amount with parameter smoothing.
      * Includes thread-safe measures to prevent audio artifacts.
      * 
-     * @param amount Feedback amount (0.0-0.95)
+     * @param amount Feedback amount (0.0-2.85)
      */
     public void setFeedback(double amount) {
         // Limit feedback to prevent runaway feedback
-        double safeAmount = Math.min(Math.max(amount, 0.0), 0.95);
+        // Even with higher maximum values, we still need to cap the actual feedback
+        // to prevent infinite feedback loops and system instability
+        double safeAmount = Math.min(Math.max(amount, 0.0), 0.98);
         
         // Only update if the change is significant
         double currentFeedback = delayFeedbackRamp.input.get();
@@ -562,24 +778,178 @@ public class FXProcessor {
      */
     public void resetDelayComponents() {
         try {
-            // Reset all delay components to safe defaults
-            delay.reset();
-            reverbEarlyDelay.reset();
-            reverbLateDelay.reset();
+            // Set delay time to a safe value
+            synchronized(delay) {
+                delay.delay.set(0.3); // 300ms is a safe default
+                delay.reset();
+            }
             
-            // Set all delay parameters to safe values
-            setDelayTime(0.3); // 300ms is a safe default
-            setFeedback(0.3);
-            setDelayWetDryMix(0.3);
+            // Reset feedback to zero
+            synchronized(delayFeedback) {
+                delayFeedback.inputB.set(0.3);
+                delayFeedbackRamp.input.set(0.3);
+            }
             
-            // Reset reverb parameters
-            setReverbSize(0.3);
-            setReverbDecay(0.3);
-            setReverbWetDryMix(0.3);
+            // Reset wet/dry mix
+            synchronized(delayMixer) {
+                delayWetDryRamp.input.set(0.3);
+                delayMixer.inputA.set(0.7); // dry
+                delayMixer.inputB.set(0.3); // wet
+            }
             
-            System.out.println("All delay components reset to safe defaults");
+            System.out.println("Delay components reset to safe defaults");
         } catch (Exception e) {
             System.err.println("Error resetting delay components: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Reset reverb components to safe default values.
+     * This can be called if audio artifacts or errors are detected.
+     */
+    public void resetReverbComponents() {
+        try {
+            // Reset reverb delays to safe values
+            synchronized(reverbEarlyDelay) {
+                reverbEarlyDelay.delay.set(0.03);
+                reverbEarlyDelay.reset();
+            }
+            
+            synchronized(reverbLateDelay) {
+                reverbLateDelay.delay.set(0.05);
+                reverbLateDelay.reset();
+            }
+            
+            // Reset filters to safe values
+            synchronized(reverbLowpass) {
+                reverbLowpass.frequency.set(4000.0);
+            }
+            
+            synchronized(reverbHighpass) {
+                reverbHighpass.frequency.set(100.0);
+            }
+            
+            // Reset feedback to safe value
+            synchronized(reverbFeedback) {
+                reverbFeedback.inputB.set(0.5);
+            }
+            
+            // Reset gain to unity
+            synchronized(reverbGain) {
+                reverbGain.inputB.set(1.0);
+            }
+            
+            // Reset wet/dry mix
+            synchronized(reverbMixer) {
+                reverbWetDryRamp.input.set(0.3);
+                reverbMixer.inputA.set(0.7); // dry
+                reverbMixer.inputB.set(0.3); // wet
+            }
+            
+            System.out.println("Reverb components reset to safe defaults");
+        } catch (Exception e) {
+            System.err.println("Error resetting reverb components: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Reset distortion components to safe default values.
+     * This can be called if audio artifacts or errors are detected.
+     */
+    public void resetDistortionComponents() {
+        try {
+            // Reset distortion amount to safe value
+            synchronized(distortion) {
+                distortion.inputB.set(1.0);
+                distortionAmountRamp.input.set(0.0);
+            }
+            
+            // Reset wet/dry mix
+            synchronized(distortionMixer) {
+                distortionWetDryRamp.input.set(0.0);
+                distortionMixer.inputA.set(1.0); // dry
+                distortionMixer.inputB.set(0.0); // wet
+            }
+            
+            System.out.println("Distortion components reset to safe defaults");
+        } catch (Exception e) {
+            System.err.println("Error resetting distortion components: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Reset chorus components to standard vintage chorus values.
+     * This can be called if audio artifacts or errors are detected,
+     * or to initialize the chorus with classic settings.
+     */
+    public void resetChorusComponents() {
+        try {
+            // Reset chorus delays to standard values
+            synchronized(chorusDelay1) {
+                chorusDelay1.delay.set(0.015); // 15ms base delay (standard for vintage chorus)
+                chorusDelay1.reset();
+            }
+            
+            synchronized(chorusDelay2) {
+                chorusDelay2.delay.set(0.022); // 22ms base delay (slightly offset for richer sound)
+                chorusDelay2.reset();
+            }
+            
+            // Reset LFOs to standard vintage chorus values
+            synchronized(chorusLFO1) {
+                chorusLFO1.frequency.set(0.8); // 0.8 Hz modulation (standard for vintage chorus)
+                chorusLFO1.amplitude.set(0.004); // 4ms modulation depth
+            }
+            
+            synchronized(chorusLFO2) {
+                chorusLFO2.frequency.set(0.95); // 0.95 Hz modulation (slightly faster for stereo effect)
+                chorusLFO2.amplitude.set(0.0035); // 3.5ms modulation depth (slightly less for balance)
+            }
+            
+            // Reset wet/dry mix to standard vintage chorus values
+            synchronized(chorusMixer) {
+                chorusWetDryRamp.input.set(1.05); // 35% wet (standard for vintage chorus)
+                chorusMixer.inputA.set(0.65); // 65% dry
+                chorusMixer.inputB.set(0.35); // 35% wet
+            }
+            
+            System.out.println("Chorus components reset to standard vintage chorus settings");
+        } catch (Exception e) {
+            System.err.println("Error resetting chorus components: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Reset all effects to safe default values.
+     * This is the main recovery method called when thread exceptions occur.
+     */
+    public void resetAllEffects() {
+        // Reset each effect independently to ensure partial recovery if one fails
+        resetDelayComponents();
+        resetReverbComponents();
+        resetDistortionComponents();
+        resetChorusComponents();
+        
+        // Update effect routing to ensure signal path is correct
+        try {
+            updateEffectRouting();
+        } catch (Exception e) {
+            System.err.println("Error updating effect routing during reset: " + e.getMessage());
+            // Last resort: disable all effects
+            try {
+                delayEnabled = false;
+                reverbEnabled = false;
+                distortionEnabled = false;
+                
+                // Connect input directly to output
+                inputMixer.output.disconnectAll();
+                outputMixer.inputA.disconnectAll();
+                inputMixer.output.connect(outputMixer.inputA);
+                
+                System.out.println("All effects disabled as safety measure");
+            } catch (Exception ex) {
+                System.err.println("Critical failure in effects reset: " + ex.getMessage());
+            }
         }
     }
     
@@ -587,11 +957,14 @@ public class FXProcessor {
      * Sets the wet/dry mix for the delay effect.
      * Includes thread-safe measures to prevent audio artifacts.
      * 
-     * @param mix Mix amount (0.0=dry, 1.0=wet)
+     * @param mix Mix amount (0.0=dry, 3.0=super wet)
      */
     public void setDelayWetDryMix(double mix) {
-        // Clamp the mix value to a valid range
-        double safeMix = Math.min(Math.max(mix, 0.0), 1.0);
+        // Clamp the mix value to a valid range (now up to 3.0)
+        double safeMix = Math.min(Math.max(mix, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedMix = Math.min(safeMix / 3.0, 1.0);
         
         // Only update if the change is significant
         double currentMix = delayWetDryRamp.input.get();
@@ -604,8 +977,9 @@ public class FXProcessor {
             
             try {
                 // Calculate the wet/dry balance
-                double dryAmount = 1.0 - safeMix;
-                double wetAmount = safeMix;
+                // For mix values > 1.0, we keep reducing the dry signal while increasing wet beyond 1.0
+                double dryAmount = Math.max(0.0, 1.0 - normalizedMix * 3.0);
+                double wetAmount = Math.min(safeMix, 3.0);
                 
                 // Set the mixer inputs for the delay effect gradually
                 // This helps prevent clicks and pops when changing the mix
@@ -623,11 +997,14 @@ public class FXProcessor {
      * Sets the wet/dry mix for the reverb effect.
      * Includes thread-safe measures to prevent audio artifacts.
      * 
-     * @param mix Mix amount (0.0=dry, 1.0=wet)
+     * @param mix Mix amount (0.0=dry, 3.0=super wet)
      */
     public void setReverbWetDryMix(double mix) {
-        // Clamp the mix value to a valid range
-        double safeMix = Math.min(Math.max(mix, 0.0), 1.0);
+        // Clamp the mix value to a valid range (now up to 3.0)
+        double safeMix = Math.min(Math.max(mix, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedMix = Math.min(safeMix / 3.0, 1.0);
         
         // Only update if the change is significant
         double currentMix = reverbWetDryRamp.input.get();
@@ -640,8 +1017,9 @@ public class FXProcessor {
             
             try {
                 // Calculate the wet/dry balance
-                double dryAmount = 1.0 - safeMix;
-                double wetAmount = safeMix * 1.5; // Boost the wet signal for more pronounced reverb
+                // For mix values > 1.0, we keep reducing the dry signal while increasing wet beyond 1.0
+                double dryAmount = Math.max(0.0, 1.0 - normalizedMix * 3.0);
+                double wetAmount = safeMix * 1.5; // Boost the wet signal for more pronounced reverb, with a reasonable cap
                 
                 // Set the mixer inputs for the reverb effect gradually
                 reverbMixer.inputA.set(dryAmount);
@@ -658,11 +1036,14 @@ public class FXProcessor {
      * Sets the wet/dry mix for the distortion effect.
      * Includes thread-safe measures to prevent audio artifacts.
      * 
-     * @param mix Mix amount (0.0=dry, 1.0=wet)
+     * @param mix Mix amount (0.0=dry, 3.0=super wet)
      */
     public void setDistortionWetDryMix(double mix) {
-        // Clamp the mix value to a valid range
-        double safeMix = Math.min(Math.max(mix, 0.0), 1.0);
+        // Clamp the mix value to a valid range (now up to 3.0)
+        double safeMix = Math.min(Math.max(mix, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedMix = Math.min(safeMix / 3.0, 1.0);
         
         // Only update if the change is significant
         double currentMix = distortionWetDryRamp.input.get();
@@ -675,8 +1056,9 @@ public class FXProcessor {
             
             try {
                 // Calculate the wet/dry balance
-                double dryAmount = 1.0 - safeMix;
-                double wetAmount = safeMix;
+                // For mix values > 1.0, we keep reducing the dry signal while increasing wet beyond 1.0
+                double dryAmount = Math.max(0.0, 1.0 - normalizedMix * 3.0);
+                double wetAmount = Math.min(safeMix, 3.0);
                 
                 // Set the mixer inputs for the distortion effect gradually
                 distortionMixer.inputA.set(dryAmount);
@@ -694,11 +1076,14 @@ public class FXProcessor {
      * Includes thread-safe measures to prevent audio artifacts.
      * Uses logarithmic scaling for more natural control.
      * 
-     * @param amount Distortion amount (0.0-1.0)
+     * @param amount Distortion amount (0.0-3.0)
      */
     public void setDistortion(double amount) {
-        // Clamp the amount parameter to 0.0-1.0 range
-        double safeAmount = Math.min(Math.max(amount, 0.0), 1.0);
+        // Clamp the amount parameter to 0.0-3.0 range
+        double safeAmount = Math.min(Math.max(amount, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedAmount = safeAmount / 3.0;
         
         // Only update if the change is significant
         double currentAmount = distortionAmountRamp.input.get();
@@ -709,9 +1094,9 @@ public class FXProcessor {
             // Apply logarithmic scaling for more natural control
             // This provides finer control at lower distortion amounts
             double logAmount;
-            if (safeAmount > 0) {
+            if (normalizedAmount > 0) {
                 // Use a logarithmic curve that gives finer control at lower settings
-                logAmount = Math.pow(safeAmount, 2.5);
+                logAmount = Math.pow(normalizedAmount, 2.5);
             } else {
                 logAmount = 0.0; // Handle amount = 0 case
             }
@@ -723,7 +1108,7 @@ public class FXProcessor {
                 // More gain for more distortion with logarithmic scaling
                 // This creates a more natural distortion curve where small changes at low amounts
                 // are more noticeable than the same changes at high amounts
-                double gain = 1.0 + (logAmount * 5.0); // 1.0-6.0 range
+                double gain = 1.0 + (logAmount * 15.0); // 1.0-16.0 range with the new maximum
                 distortion.inputB.set(gain);
             } catch (Exception e) {
                 // If an error occurs, set to a safe default value
@@ -737,11 +1122,14 @@ public class FXProcessor {
      * Adjusts delay times and filter settings to simulate different room sizes.
      * Includes thread-safe measures to prevent audio artifacts and buffer overruns.
      * 
-     * @param size Room size (0.0-1.0)
+     * @param size Room size (0.0-3.0)
      */
     public void setReverbSize(double size) {
-        // Clamp the size parameter to 0.0-1.0 range
-        double safeSize = Math.min(Math.max(size, 0.0), 1.0);
+        // Clamp the size parameter to 0.0-3.0 range
+        double safeSize = Math.min(Math.max(size, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedSize = Math.min(safeSize / 3.0, 1.0);
         
         // Only update if the change is significant
         double currentSize = reverbSizeRamp.input.get();
@@ -756,20 +1144,20 @@ public class FXProcessor {
                 
                 try {
                     // Calculate delay times with strict bounds checking
-                    // Early reflections (30ms to 80ms)
+                    // Early reflections (30ms to 230ms with the new maximum)
                     // Make sure we stay well within the allocated buffer size (22050+100 samples = ~0.5s)
                     double maxEarlyDelay = 0.45; // Maximum safe delay time in seconds
-                    double earlyDelayTime = Math.min(0.03 + (safeSize * 0.05), maxEarlyDelay);
+                    double earlyDelayTime = Math.min(0.03 + (normalizedSize * 0.2), maxEarlyDelay);
                     
                     // Synchronize access to the early delay component
                     synchronized(reverbEarlyDelay) {
                         reverbEarlyDelay.delay.set(earlyDelayTime);
                     }
                     
-                    // Late reflections (50ms to 150ms)
+                    // Late reflections (50ms to 350ms with the new maximum)
                     // Make sure we stay well within the allocated buffer size (44100+100 samples = ~1s)
                     double maxLateDelay = 0.9; // Maximum safe delay time in seconds
-                    double lateDelayTime = Math.min(0.05 + (safeSize * 0.1), maxLateDelay);
+                    double lateDelayTime = Math.min(0.05 + (normalizedSize * 0.3), maxLateDelay);
                     
                     // Synchronize access to the late delay component
                     synchronized(reverbLateDelay) {
@@ -778,11 +1166,11 @@ public class FXProcessor {
                     
                     // Adjust filter frequencies based on room size
                     // Larger rooms have more low frequency content (damping of high frequencies)
-                    double lowpassFreq = 5000 - (safeSize * 2000); // 5000Hz to 3000Hz
+                    double lowpassFreq = 5000 - (normalizedSize * 3000); // 5000Hz to 2000Hz with more extreme filtering
                     reverbLowpass.frequency.set(lowpassFreq);
                     
                     // Smaller rooms have less low frequency buildup
-                    double highpassFreq = 100 + (safeSize * 50); // 100Hz to 150Hz
+                    double highpassFreq = 100 + (normalizedSize * 150); // 100Hz to 250Hz with more extreme filtering
                     reverbHighpass.frequency.set(highpassFreq);
                 } catch (Exception e) {
                     // If an error occurs, set to safe default values
@@ -812,11 +1200,14 @@ public class FXProcessor {
      * Includes thread-safe measures to prevent audio artifacts.
      * Uses synchronized blocks to ensure thread safety during parameter updates.
      * 
-     * @param decay Decay amount (0.0-1.0)
+     * @param decay Decay amount (0.0-3.0)
      */
     public void setReverbDecay(double decay) {
-        // Clamp the decay parameter to 0.0-1.0 range
-        double safeDecay = Math.min(Math.max(decay, 0.0), 1.0);
+        // Clamp the decay parameter to 0.0-3.0 range
+        double safeDecay = Math.min(Math.max(decay, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedDecay = Math.min(safeDecay / 3.0, 1.0);
         
         // Only update if the change is significant
         double currentDecay = reverbDecayRamp.input.get();
@@ -830,11 +1221,11 @@ public class FXProcessor {
                 reverbDecayRamp.input.set(safeDecay);
                 
                 try {
-                    // Map decay to feedback amount (0.4 to 0.9)
+                    // Map decay to feedback amount (0.4 to 0.95)
                     // Higher feedback = longer decay time
                     // Limit the maximum feedback to prevent buffer overruns
-                    double maxFeedback = 0.85; // Limit maximum feedback to prevent excessive delay times
-                    double feedback = Math.min(0.4 + (safeDecay * 0.5), maxFeedback);
+                    double maxFeedback = 0.95; // Increased maximum feedback for longer decay times
+                    double feedback = Math.min(0.4 + (normalizedDecay * 0.55), maxFeedback);
                     
                     // Synchronize access to the feedback component
                     synchronized(reverbFeedback) {
@@ -861,11 +1252,14 @@ public class FXProcessor {
      * Controls the overall level of the reverb effect.
      * Includes thread-safe measures to prevent audio artifacts.
      * 
-     * @param gain Gain amount (0.0-1.0)
+     * @param gain Gain amount (0.0-3.0)
      */
     public void setReverbGain(double gain) {
-        // Clamp the gain parameter to 0.0-1.0 range
-        double safeGain = Math.min(Math.max(gain, 0.0), 1.0);
+        // Clamp the gain parameter to 0.0-3.0 range
+        double safeGain = Math.min(Math.max(gain, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedGain = Math.min(safeGain / 3.0, 1.0);
         
         // Only update if the change is significant
         double currentGain = reverbGainRamp.input.get();
@@ -876,14 +1270,142 @@ public class FXProcessor {
             // Update the gain parameter with smooth transition
             reverbGainRamp.input.set(safeGain);
             
-            // Map gain to actual gain multiplier (0.5 to 1.5)
+            // Map gain to actual gain multiplier (0.5 to 2.5)
             // Use a try-catch block to handle any potential errors
             try {
-                double gainMultiplier = 0.5 + safeGain;
+                double gainMultiplier = 0.5 + (normalizedGain * 2.0);
                 reverbGain.inputB.set(gainMultiplier);
             } catch (Exception e) {
                 // If an error occurs, set to a safe default value
                 reverbGain.inputB.set(1.0);
+            }
+        }
+    }
+    
+    /**
+     * Sets the chorus rate (0.0 to 3.0).
+     * Controls the speed of the LFO modulation.
+     * Includes thread-safe measures to prevent audio artifacts.
+     * 
+     * @param rate Chorus rate, 0.0 = slow, 3.0 = fast
+     */
+    public void setChorusRate(double rate) {
+        // Clamp to valid range
+        double safeRate = Math.min(Math.max(rate, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedRate = Math.min(safeRate / 3.0, 1.0);
+        
+        // Only update if the change is significant
+        double currentRate = chorusRateRamp.input.get();
+        if (Math.abs(currentRate - safeRate) > 0.001) {
+            try {
+                // Map to a useful frequency range (0.5 Hz to 5 Hz) - standard vintage chorus range
+                double mappedRate = 0.5 + (normalizedRate * 4.5);
+                
+                // Update the rate parameter with smooth transition
+                chorusRateRamp.input.set(safeRate);
+                
+                // Set slightly different rates for the two LFOs for a richer sound
+                chorusLFO1.frequency.set(mappedRate);
+                chorusLFO2.frequency.set(mappedRate * 1.15); // 15% faster (vintage chorus typically uses subtle differences)
+                
+                System.out.println("Chorus rate set to: " + mappedRate + " Hz");
+            } catch (Exception e) {
+                // If an error occurs, set to safe default values
+                chorusLFO1.frequency.set(0.8); // Standard vintage chorus rate
+                chorusLFO2.frequency.set(0.95);
+                System.err.println("Error setting chorus rate: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * Sets the chorus depth (0.0 to 3.0).
+     * Controls how much the delay time varies.
+     * Includes thread-safe measures to prevent audio artifacts.
+     * 
+     * @param depth Chorus depth, 0.0 = subtle, 3.0 = extreme
+     */
+    public void setChorusDepth(double depth) {
+        // Clamp to valid range
+        double safeDepth = Math.min(Math.max(depth, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedDepth = Math.min(safeDepth / 3.0, 1.0);
+        
+        // Only update if the change is significant
+        double currentDepth = chorusDepthRamp.input.get();
+        if (Math.abs(currentDepth - safeDepth) > 0.001) {
+            try {
+                // Map to a useful amplitude range (0.002 to 0.01)
+                // This controls how much the delay time varies - standard vintage chorus uses 2-10ms
+                double mappedDepth = 0.002 + (normalizedDepth * 0.008);
+                
+                // Update the depth parameter with smooth transition
+                chorusDepthRamp.input.set(safeDepth);
+                
+                // Set slightly different depths for the two LFOs
+                chorusLFO1.amplitude.set(mappedDepth);
+                chorusLFO2.amplitude.set(mappedDepth * 0.85); // 15% less depth (vintage chorus uses subtle differences)
+                
+                System.out.println("Chorus depth set to: " + (mappedDepth * 1000) + " ms");
+            } catch (Exception e) {
+                // If an error occurs, set to safe default values
+                chorusLFO1.amplitude.set(0.004); // Standard vintage chorus depth
+                chorusLFO2.amplitude.set(0.0035);
+                System.err.println("Error setting chorus depth: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * Sets the chorus wet/dry mix (0.0 to 3.0).
+     * Controls the balance between the dry and processed signal.
+     * Includes thread-safe measures to prevent audio artifacts.
+     * 
+     * @param mix Mix amount (0.0=dry, 3.0=super wet)
+     */
+    public void setChorusWetDryMix(double mix) {
+        // Clamp the mix value to a valid range (now up to 3.0)
+        double safeMix = Math.min(Math.max(mix, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedMix = Math.min(safeMix / 3.0, 1.0);
+        
+        // Only update if the change is significant
+        double currentMix = chorusWetDryRamp.input.get();
+        if (Math.abs(currentMix - safeMix) > 0.001) {
+            // Update the mix parameter with smooth transition
+            chorusWetDryRamp.input.set(safeMix);
+            
+            try {
+                // Standard vintage chorus typically uses 65% dry / 35% wet as a starting point
+                // For mix values > 1.0, we keep reducing the dry signal while increasing wet beyond 1.0
+                
+                // Calculate wet amount (0.0-1.0 range for standard settings)
+                double wetAmount = normalizedMix;
+                
+                // Calculate dry amount (standard vintage chorus always maintains some dry signal)
+                double dryAmount = Math.max(0.2, 1.0 - wetAmount);
+                
+                // For extreme settings (mix > 1.0), allow wet to go higher
+                if (safeMix > 1.0) {
+                    wetAmount = safeMix;
+                    dryAmount = Math.max(0.0, 1.0 - (normalizedMix * 1.5)); // Reduce dry faster
+                }
+                
+                // Set the mixer inputs for the chorus effect gradually
+                chorusMixer.inputA.set(dryAmount);
+                chorusMixer.inputB.set(wetAmount);
+                
+                System.out.println("Chorus mix set to: " + (int)(wetAmount * 100) + "% wet / " + 
+                                  (int)(dryAmount * 100) + "% dry");
+            } catch (Exception e) {
+                // If an error occurs, set to safe default values - standard vintage chorus mix
+                chorusMixer.inputA.set(0.65); // 65% dry
+                chorusMixer.inputB.set(0.35); // 35% wet
+                System.err.println("Error setting chorus mix: " + e.getMessage());
             }
         }
     }

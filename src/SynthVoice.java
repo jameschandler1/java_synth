@@ -9,10 +9,38 @@ import com.jsyn.unitgen.*;
  * allowing it to play one note independently of other voices.
  */
 public class SynthVoice {
+    /**
+     * Enum defining the available oscillator waveform types.
+     * Each waveform has a distinct timbre and harmonic content.
+     */
+    public enum OscillatorType {
+        SINE("Sine"),           // Pure sine wave, no harmonics
+        SQUARE("Square"),       // Square wave, rich in odd harmonics
+        SAW("Saw"),             // Sawtooth wave, rich in all harmonics
+        TRIANGLE("Triangle"),   // Triangle wave, odd harmonics that fall off quickly
+        NOISE("Noise");         // White noise, all frequencies at random phases
+        
+        private final String displayName;
+        
+        OscillatorType(String displayName) {
+            this.displayName = displayName;
+        }
+        
+        public String getDisplayName() {
+            return displayName;
+        }
+        
+        @Override
+        public String toString() {
+            return displayName;
+        }
+    }
     private UnitOscillator oscillator;     // Sound generator
     private EnvelopeDAHDSR envelope;        // Volume envelope
     private int currentNote = -1;           // Currently playing MIDI note (-1 = none)
     private boolean active = false;         // Whether voice is currently in use
+    private OscillatorType currentOscType = OscillatorType.SINE;  // Current oscillator type
+    private Synthesizer synth;              // Reference to the synth for adding/removing units
 
     /**
      * Creates a new synthesizer voice with its own oscillator and envelope.
@@ -20,6 +48,7 @@ public class SynthVoice {
      * @param synth The JSyn synthesizer instance to add components to
      */
     public SynthVoice(Synthesizer synth) {
+        this.synth = synth;                 // Store synth reference for later use
         initializeComponents(synth);     // Create and register components
         configureDefaults();            // Set default parameters
         connectComponents();            // Connect signal path
@@ -31,7 +60,8 @@ public class SynthVoice {
      * @param synth The JSyn synthesizer to register components with
      */
     private void initializeComponents(Synthesizer synth) {
-        oscillator = new SineOscillator();      // Create sine wave oscillator
+        // Create default sine wave oscillator
+        oscillator = createOscillator(OscillatorType.SINE);
         envelope = new EnvelopeDAHDSR();        // Create DAHDSR envelope
         synth.add(oscillator);                  // Register with synth
         synth.add(envelope);                    // Register with synth
@@ -121,36 +151,127 @@ public class SynthVoice {
     /**
      * Sets the envelope attack time.
      * 
-     * @param seconds Attack time in seconds
+     * @param seconds Attack time in seconds (0.0-3.0)
      */
     public void setAttack(double seconds) {
-        envelope.attack.set(seconds);  // Set attack time
+        // Clamp the attack time to 0.0-3.0 seconds range
+        double safeAttack = Math.min(Math.max(seconds, 0.0), 3.0);
+        
+        envelope.attack.set(safeAttack);  // Set attack time
     }
 
     /**
      * Sets the envelope decay time.
      * 
-     * @param seconds Decay time in seconds
+     * @param seconds Decay time in seconds (0.0-3.0)
      */
     public void setDecay(double seconds) {
-        envelope.decay.set(seconds);  // Set decay time
+        // Clamp the decay time to 0.0-3.0 seconds range
+        double safeDecay = Math.min(Math.max(seconds, 0.0), 3.0);
+        
+        envelope.decay.set(safeDecay);  // Set decay time
     }
 
     /**
      * Sets the envelope sustain level.
      * 
-     * @param level Sustain level (0.0-1.0)
+     * @param level Sustain level (0.0-3.0)
      */
     public void setSustain(double level) {
-        envelope.sustain.set(level);  // Set sustain level
+        // Clamp the sustain level to 0.0-3.0 range
+        double safeLevel = Math.min(Math.max(level, 0.0), 3.0);
+        
+        // Normalize for internal processing (0.0-1.0)
+        double normalizedLevel = Math.min(safeLevel / 3.0, 1.0);
+        
+        envelope.sustain.set(normalizedLevel);  // Set sustain level
     }
 
     /**
      * Sets the envelope release time.
      * 
-     * @param seconds Release time in seconds
+     * @param seconds Release time in seconds (0.0-3.0)
      */
     public void setRelease(double seconds) {
-        envelope.release.set(seconds);  // Set release time
+        // Clamp the release time to 0.0-3.0 seconds range
+        double safeRelease = Math.min(Math.max(seconds, 0.0), 3.0);
+        
+        envelope.release.set(safeRelease);  // Set release time
+    }
+    
+    /**
+     * Changes the oscillator type to the specified waveform.
+     * This method replaces the current oscillator with a new one of the specified type,
+     * preserving the current frequency and amplitude settings.
+     * 
+     * @param type The new oscillator type to use
+     */
+    public void setOscillatorType(OscillatorType type) {
+        if (type == currentOscType) {
+            return;  // No change needed
+        }
+        
+        // Store current settings
+        double currentFreq = 440.0;  // Default frequency
+        double currentAmp = 0.3;     // Default amplitude
+        
+        if (oscillator != null) {
+            currentFreq = oscillator.frequency.get();
+            currentAmp = oscillator.amplitude.get();
+            
+            // Disconnect and remove old oscillator
+            oscillator.output.disconnect(0, envelope.amplitude, 0);
+            synth.remove(oscillator);
+        }
+        
+        // Create new oscillator of the requested type
+        oscillator = createOscillator(type);
+        synth.add(oscillator);
+        
+        // Restore settings
+        oscillator.frequency.set(currentFreq);
+        oscillator.amplitude.set(currentAmp);
+        
+        // Connect to envelope
+        oscillator.output.connect(envelope.amplitude);
+        
+        // Update current type
+        currentOscType = type;
+    }
+    
+    /**
+     * Creates a new oscillator of the specified type.
+     * 
+     * @param type The type of oscillator to create
+     * @return A new UnitOscillator instance of the specified type
+     */
+    private UnitOscillator createOscillator(OscillatorType type) {
+        switch (type) {
+            case SINE:
+                return new SineOscillator();
+            case SQUARE:
+                return new SquareOscillator();
+            case SAW:
+                return new SawtoothOscillator();
+            case TRIANGLE:
+                return new TriangleOscillator();
+            case NOISE:
+                // WhiteNoise is not a UnitOscillator, so we need to wrap it
+                // We'll use a RedNoise (filtered noise) with high frequency to approximate white noise
+                RedNoise noise = new RedNoise();
+                noise.frequency.set(10000); // High cutoff for whiter noise
+                return noise;
+            default:
+                return new SineOscillator();  // Default to sine
+        }
+    }
+    
+    /**
+     * Gets the current oscillator type.
+     * 
+     * @return The current oscillator type
+     */
+    public OscillatorType getCurrentOscillatorType() {
+        return currentOscType;
     }
 }

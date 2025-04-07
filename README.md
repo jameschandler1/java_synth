@@ -6,9 +6,11 @@ A polyphonic synthesizer built with Java and JSyn, featuring a retro 80s-inspire
 
 - Multi-mode filter (Low-pass, High-pass, Band-pass)
 - Audio effects processor with multiple effect types:
-  - Delay with adjustable time and feedback
+  - Delay with adjustable time and feedback, plus tempo sync option
   - Reverb simulation with size control
   - Distortion with adjustable drive amount
+  - Chorus effect with vintage-style dual delay lines
+- Buffer preservation when toggling effects (no audio glitches)
 - DAHDSR envelope for amplitude control
 - 8-voice polyphony for rich sound
 - Computer keyboard control with visual note display
@@ -78,10 +80,11 @@ rm -f src/*.class
 - Release: Time for sound to fade after key release (1-1000ms)
 
 ### Effects Section
-- Type: Choose between None, Delay, Reverb, and Distortion effects
-- Parameter 1: Controls primary effect parameter (delay time, reverb size, or distortion amount)
-- Parameter 2: Controls secondary effect parameter (feedback for delay)
+- Type: Choose between None, Delay, Reverb, Distortion, and Chorus effects
+- Parameter 1: Controls primary effect parameter (delay time, reverb size, distortion amount, or chorus rate)
+- Parameter 2: Controls secondary effect parameter (feedback for delay, chorus depth)
 - Mix: Controls wet/dry balance of the effect
+- Sync (Delay only): When enabled, quantizes delay time to musical values based on 120 BPM
 
 ### Master Section
 - Volume: Overall output volume (0-100%)
@@ -102,11 +105,14 @@ Use these keys to play notes:
 - **Main**: Entry point for the application with thread safety monitoring
 - **SynthEngine**: Central engine managing voices, filters, and audio routing
 - **SynthVoice**: Individual voice for polyphonic synthesis
-- **FXProcessor**: Audio effects processor for delay, reverb, and distortion
+- **FXProcessor**: Audio effects processor for delay, reverb, distortion, and chorus
 - **SynthUI**: User interface with controls and visual feedback
 
 ### Recent Optimizations
 
+- **Effect Buffer Preservation**: Implemented a system that preserves effect buffer contents when toggling effects on/off, preventing audio glitches and ensuring smooth transitions
+- **Vintage Chorus Effect**: Added a rich chorus effect with dual delay lines (15ms/22ms) and independent LFOs (0.8Hz/0.95Hz) modeled after classic analog hardware
+- **Parallel Effect Routing**: All effects process the input signal independently in parallel to maintain audio quality
 - **Logarithmic Scaling**: Implemented for all sliders to provide more natural control over parameters
 - **Documentation**: Added comprehensive JavaDoc to all methods explaining their purpose and behavior
 - **Code Cleanup**: Removed unused methods, duplicate code, and unnecessary comments

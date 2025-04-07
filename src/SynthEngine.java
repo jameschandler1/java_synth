@@ -47,8 +47,11 @@ public class SynthEngine {
     private boolean delayEnabled = false;
     private boolean reverbEnabled = false;
     private boolean distortionEnabled = false;
-    // This flag will be used in future implementation of delay sync functionality
-    private boolean delaySyncEnabled = false; // TODO: Implement delay sync in future update
+    private boolean chorusEnabled = false;
+    private boolean delaySyncEnabled = false;
+    
+    // Current oscillator type for all voices
+    private SynthVoice.OscillatorType currentOscillatorType = SynthVoice.OscillatorType.SINE;
     
     // Parameter smoothing to prevent audio artifacts
     private LinearRamp cutoffRamp;    // Smooths filter cutoff changes
@@ -268,18 +271,18 @@ public class SynthEngine {
 
     /**
      * Sets the filter cutoff frequency with smoothing.
-     * The frequency is clamped to the audible range and uses logarithmic scaling
+     * The frequency is clamped to the extended range and uses logarithmic scaling
      * for more natural frequency perception (following the musical scale).
      * 
-     * @param frequency Desired cutoff frequency in Hz (20-20000)
+     * @param frequency Desired cutoff frequency in Hz (20-60000)
      */
     public void setCutoff(double frequency) {
-        // Clamp frequency to audible range (20Hz - 20kHz)
-        double safeFreq = Math.min(20000.0, Math.max(20.0, frequency));
+        // Clamp frequency to extended range (20Hz - 60kHz)
+        double safeFreq = Math.min(60000.0, Math.max(20.0, frequency));
         
         // Apply logarithmic scaling for more natural frequency perception
         // This follows the musical scale where each octave doubles the frequency
-        // If the input is already in Hz (20-20000), we don't need additional scaling
+        // If the input is already in Hz (20-60000), we don't need additional scaling
         // as frequency itself is already logarithmic in nature
         
         cutoffRamp.input.set(safeFreq);  // Set with smoothing
@@ -289,11 +292,12 @@ public class SynthEngine {
      * Sets the filter resonance with smoothing.
      * The value is scaled to prevent self-oscillation.
      * 
-     * @param resonance Resonance value (0.0-1.0)
+     * @param resonance Resonance value (0.0-3.0)
      */
     public void setResonance(double resonance) {
-        // Scale resonance to safe range (0.0 to 0.6)
-        double scaledResonance = resonance * 0.6;  // Prevent extreme resonance
+        // Scale resonance to safe range (0.0 to 0.9)
+        // Higher maximum but still prevent extreme self-oscillation
+        double scaledResonance = Math.min(0.9, resonance * 0.3);  // Prevent extreme resonance
         resonanceRamp.input.set(scaledResonance);  // Set with smoothing
     }
 
@@ -301,33 +305,38 @@ public class SynthEngine {
      * Sets the master volume with smoothing to prevent clicks.
      * Uses a logarithmic scale for more natural volume perception.
      * 
-     * @param volume Volume level (0.0-1.0)
+     * @param volume Volume level (0.0-5.0)
      */
     public void setMasterVolume(double volume) {
-        // Ensure volume is within valid range
-        double safeVolume = Math.min(Math.max(volume, 0.0), 1.0);
+        // Ensure volume is within valid range (now up to 5.0 for louder output)
+        double safeVolume = Math.min(Math.max(volume, 0.0), 5.0);
+        
+        // Scale down to 0.0-1.0 range for internal processing
+        double normalizedVolume = safeVolume / 5.0;
         
         // Apply logarithmic scaling for more natural volume perception
         // This creates a more natural volume curve where small changes at low volumes
         // are more noticeable than the same changes at high volumes
         double logVolume;
-        if (safeVolume > 0) {
+        if (normalizedVolume > 0) {
             // Use a logarithmic curve that gives finer control at lower volumes
-            // The constant 4.0 determines how pronounced the logarithmic curve is
-            logVolume = Math.pow(safeVolume, 4.0);
+            // The constant 3.0 determines how pronounced the logarithmic curve is
+            // Lower exponent (3.0 instead of 4.0) provides more headroom at higher volumes
+            logVolume = Math.pow(normalizedVolume, 3.0) * 4.0; // Scale up for higher maximum output
         } else {
             logVolume = 0.0; // Handle volume = 0 case
         }
         
         // Apply the scaled volume with smoothing
-        volumeRamp.input.set(logVolume);
+        // Increased maximum to 3.0 for louder output while still preventing extreme distortion
+        volumeRamp.input.set(Math.min(logVolume, 3.0));
     }
 
     /**
      * Sets the attack time for all voice envelopes.
      * Attack is the time taken for the sound to reach full volume.
      * 
-     * @param seconds Attack time in seconds
+     * @param seconds Attack time in seconds (0.0-3.0)
      */
     public void setEnvelopeAttack(double seconds) {
         System.out.println("Setting envelope attack: " + seconds + " seconds");
@@ -341,7 +350,7 @@ public class SynthEngine {
      * Sets the decay time for all voice envelopes.
      * Decay is the time taken to reach the sustain level after attack.
      * 
-     * @param seconds Decay time in seconds
+     * @param seconds Decay time in seconds (0.0-3.0)
      */
     public void setEnvelopeDecay(double seconds) {
         System.out.println("Setting envelope decay: " + seconds + " seconds");
@@ -355,7 +364,7 @@ public class SynthEngine {
      * Sets the sustain level for all voice envelopes.
      * Sustain is the volume level held after decay until note-off.
      * 
-     * @param level Sustain level (0.0-1.0)
+     * @param level Sustain level (0.0-3.0)
      */
     public void setEnvelopeSustain(double level) {
         System.out.println("Setting envelope sustain: " + level);
@@ -369,7 +378,7 @@ public class SynthEngine {
      * Sets the release time for all voice envelopes.
      * Release is the time taken for the sound to fade after note-off.
      * 
-     * @param seconds Release time in seconds
+     * @param seconds Release time in seconds (0.0-3.0)
      */
     public void setEnvelopeRelease(double seconds) {
         System.out.println("Setting envelope release: " + seconds + " seconds");
@@ -410,7 +419,8 @@ public class SynthEngine {
     
     /**
      * Sets the delay time for the delay effect.
-     * If delay sync is enabled, the time will be quantized to musical values.
+     * If delay sync is enabled, the time will be quantized to musical values based on
+     * a tempo of 120 BPM, creating rhythmically relevant delay times.
      * 
      * @param seconds Delay time in seconds (0.0-2.0)
      */
@@ -421,7 +431,15 @@ public class SynthEngine {
             double beatDuration = 60.0 / bpm; // Duration of one beat in seconds
             
             // Available note durations (in beats)
-            double[] noteDurations = {0.25, 0.5, 1.0, 1.5, 2.0}; // 16th, 8th, quarter, dotted quarter, half
+            double[] noteDurations = {
+                0.25,  // 16th note
+                0.375, // dotted 16th note
+                0.5,   // 8th note
+                0.75,  // dotted 8th note
+                1.0,   // quarter note
+                1.5,   // dotted quarter note
+                2.0    // half note
+            };
             
             // Find the closest musical value
             double closestDuration = noteDurations[0] * beatDuration;
@@ -439,6 +457,20 @@ public class SynthEngine {
             
             // Use the quantized value
             fxProcessor.setDelayTime(closestDuration);
+            
+            // Print the musical value for user feedback
+            String noteName = "";
+            double noteValue = closestDuration / beatDuration;
+            
+            if (noteValue == 0.25) noteName = "16th note";
+            else if (noteValue == 0.375) noteName = "dotted 16th note";
+            else if (noteValue == 0.5) noteName = "8th note";
+            else if (noteValue == 0.75) noteName = "dotted 8th note";
+            else if (noteValue == 1.0) noteName = "quarter note";
+            else if (noteValue == 1.5) noteName = "dotted quarter note";
+            else if (noteValue == 2.0) noteName = "half note";
+            
+            System.out.println("Delay time quantized to: " + noteName + " (" + closestDuration + " seconds)");
         } else {
             // Use the exact value provided
             fxProcessor.setDelayTime(seconds);
@@ -501,6 +533,7 @@ public class SynthEngine {
         setDelayWetDryMix(mix);
         setReverbWetDryMix(mix);
         setDistortionWetDryMix(mix);
+        setChorusWetDryMix(mix);
     }
     
     /**
@@ -553,23 +586,45 @@ public class SynthEngine {
     }
     
     /**
+     * Enables or disables the chorus effect.
+     * 
+     * @param enabled Whether the chorus effect should be enabled
+     */
+    public void enableChorusEffect(boolean enabled) {
+        chorusEnabled = enabled;
+        updateEffectState();
+    }
+    
+    /**
      * Enables or disables delay sync mode.
-     * When sync is enabled, delay time will be quantized to musical values.
+     * When sync is enabled, delay time will be quantized to musical values based on
+     * a tempo of 120 BPM, creating rhythmically relevant delay times.
+     * 
+     * This feature allows for musical delay effects that are synchronized with the
+     * implied tempo of the music being played. When enabled, the delay slider will
+     * snap to the nearest musical value (16th note, 8th note, quarter note, etc.)
      * 
      * @param enabled Whether sync mode should be enabled
      */
     public void setDelaySyncEnabled(boolean enabled) {
         delaySyncEnabled = enabled;
         
-        // If sync is enabled, quantize the delay time to musical values
+        System.out.println("Delay sync mode " + (enabled ? "enabled" : "disabled"));
+        
+        // If sync is enabled, quantize the current delay time to musical values
         if (enabled) {
-            // Calculate a musically relevant delay time (e.g., quarter note at 120 BPM)
-            // 60 seconds / 120 BPM = 0.5 seconds per beat
-            double syncedDelayTime = 0.5; // Quarter note at 120 BPM
-            fxProcessor.setDelayTime(syncedDelayTime);
+            // Get the current delay time from the FX processor
+            double currentDelayTime = fxProcessor.getDelayTime();
+            
+            // Re-apply it through our setDelayTime method which will now quantize it
+            setDelayTime(currentDelayTime);
+            
+            // Provide feedback about the sync mode
+            System.out.println("Delay times will now snap to musical values (based on 120 BPM)");
+            System.out.println("Available note values: 16th, dotted 16th, 8th, dotted 8th, quarter, dotted quarter, half");
+        } else {
+            System.out.println("Delay times can now be set to any value");
         }
-        // When disabled, the delay time remains at its current value
-        // and can be freely adjusted
     }
     
 
@@ -582,6 +637,7 @@ public class SynthEngine {
         fxProcessor.enableDelayEffect(delayEnabled);
         fxProcessor.enableReverbEffect(reverbEnabled);
         fxProcessor.enableDistortionEffect(distortionEnabled);
+        fxProcessor.enableChorusEffect(chorusEnabled);
     }
     
     /**
@@ -654,6 +710,36 @@ public class SynthEngine {
         // Map the old resonance parameter to the new gain parameter
         fxProcessor.setReverbGain(resonance);
     }
+    
+    /**
+     * Sets the chorus rate parameter.
+     * Controls the speed of the LFO modulation.
+     * 
+     * @param rate The chorus rate (0.0-10.0 Hz)
+     */
+    public void setChorusRate(double rate) {
+        fxProcessor.setChorusRate(rate);
+    }
+    
+    /**
+     * Sets the chorus depth parameter.
+     * Controls how much the delay time varies.
+     * 
+     * @param depth The chorus depth (0.0-1.0)
+     */
+    public void setChorusDepth(double depth) {
+        fxProcessor.setChorusDepth(depth);
+    }
+    
+    /**
+     * Sets the chorus wet/dry mix.
+     * Controls the balance between dry and processed signal.
+     * 
+     * @param mix The wet/dry mix (0.0-1.0)
+     */
+    public void setChorusWetDryMix(double mix) {
+        fxProcessor.setChorusWetDryMix(mix);
+    }
 
     /**
      * Gets the current filter type.
@@ -662,6 +748,32 @@ public class SynthEngine {
      */
     public FilterType getCurrentFilterType() {
         return currentFilterType;  // Return current filter mode
+    }
+    
+    /**
+     * Gets the current oscillator type.
+     * 
+     * @return The current oscillator type
+     */
+    public SynthVoice.OscillatorType getCurrentOscillatorType() {
+        return currentOscillatorType;
+    }
+    
+    /**
+     * Sets the oscillator type for all voices.
+     * Changes the waveform used by all oscillators in the synthesizer.
+     * 
+     * @param type The new oscillator type to use
+     */
+    public void setOscillatorType(SynthVoice.OscillatorType type) {
+        if (type != currentOscillatorType) {
+            currentOscillatorType = type;
+            
+            // Update all voices with the new oscillator type
+            for (SynthVoice voice : voices) {
+                voice.setOscillatorType(type);
+            }
+        }
     }
 
     /**
